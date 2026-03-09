@@ -5,3 +5,5 @@
 - Never commit secret values to git.
 - Keep required env variable names in `.env.example` with placeholder values only.
 - When adding a feature that needs a new secret, explicitly tell the user which key(s) to add to `.env`.
+- Before making edits, review `BUGS.md` and `LINT.md`.
+- Before finalizing work, run `npm run lint` and `npm run build`.
