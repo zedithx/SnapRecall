@@ -13,8 +13,7 @@ require('dotenv').config({ path: path.join(__dirname, '../.env') })
 
 const isDev = !app.isPackaged
 const rendererURL = process.env.ELECTRON_RENDERER_URL || 'http://localhost:5173'
-const defaultCaptureShortcut =
-  process.env.CAPTURE_SHORTCUT || 'CommandOrControl+Shift+S'
+const defaultCaptureShortcut = process.env.CAPTURE_SHORTCUT || 'CommandOrControl+Shift+S'
 
 let mainWindow = null
 let captureShortcut = defaultCaptureShortcut
@@ -23,34 +22,43 @@ function getSettingsPath() {
   return path.join(app.getPath('userData'), 'snaprecall-settings.json')
 }
 
-function loadCaptureShortcut() {
+function loadAppSettings() {
   try {
     const raw = fs.readFileSync(getSettingsPath(), 'utf8')
     const parsed = JSON.parse(raw)
 
-    if (
+    const loadedShortcut =
       parsed &&
       typeof parsed.captureShortcut === 'string' &&
       parsed.captureShortcut.trim() !== ''
-    ) {
-      return parsed.captureShortcut.trim()
+        ? parsed.captureShortcut.trim()
+        : defaultCaptureShortcut
+
+    return {
+      captureShortcut: loadedShortcut
     }
   } catch (_err) {
-    return defaultCaptureShortcut
+    return {
+      captureShortcut: defaultCaptureShortcut
+    }
   }
-
-  return defaultCaptureShortcut
 }
 
-function saveCaptureShortcut(shortcutValue) {
+function saveAppSettings() {
   try {
     fs.writeFileSync(
       getSettingsPath(),
-      JSON.stringify({ captureShortcut: shortcutValue }, null, 2),
+      JSON.stringify(
+        {
+          captureShortcut
+        },
+        null,
+        2
+      ),
       'utf8'
     )
   } catch (err) {
-    console.error('Failed to persist shortcut settings:', err)
+    console.error('Failed to persist app settings:', err)
   }
 }
 
@@ -87,10 +95,7 @@ function registerCaptureShortcut(shortcutValue) {
     }
   }
 
-  if (
-    nextShortcut === captureShortcut &&
-    globalShortcut.isRegistered(nextShortcut)
-  ) {
+  if (nextShortcut === captureShortcut && globalShortcut.isRegistered(nextShortcut)) {
     return {
       ok: true,
       shortcut: nextShortcut
@@ -151,6 +156,8 @@ function createWindow() {
     }
   })
 
+  mainWindow.maximize()
+
   if (isDev) {
     mainWindow.loadURL(rendererURL)
   } else {
@@ -181,7 +188,8 @@ async function capturePrimaryDisplay() {
 }
 
 app.whenReady().then(() => {
-  captureShortcut = loadCaptureShortcut()
+  const settings = loadAppSettings()
+  captureShortcut = settings.captureShortcut
 
   createWindow()
   registerShortcuts()
@@ -199,7 +207,7 @@ app.whenReady().then(() => {
   ipcMain.handle('shortcut:update', async (_event, nextShortcut) => {
     const result = registerCaptureShortcut(nextShortcut)
     if (result.ok) {
-      saveCaptureShortcut(result.shortcut)
+      saveAppSettings()
       if (mainWindow) {
         mainWindow.webContents.send('shortcut:updated', {
           shortcut: result.shortcut

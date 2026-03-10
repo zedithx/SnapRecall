@@ -7,15 +7,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
-	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
 	"importanttracker/backend/internal/model"
 
+	"github.com/golang-migrate/migrate/v4"
+	"github.com/golang-migrate/migrate/v4/database/postgres"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
 	_ "github.com/lib/pq"
+	gormpostgres "gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const defaultStoreTimeout = 10 * time.Second
@@ -24,7 +27,58 @@ const defaultStoreTimeout = 10 * time.Second
 var migrationFS embed.FS
 
 type PostgresStore struct {
-	db *sql.DB
+	db *gorm.DB
+}
+
+type captureRow struct {
+	ID          string    `gorm:"column:id;type:text;primaryKey"`
+	UserID      string    `gorm:"column:user_id;type:text;not null"`
+	CapturedAt  time.Time `gorm:"column:captured_at;not null"`
+	SourceApp   string    `gorm:"column:source_app;type:text;not null;default:''"`
+	SourceTitle string    `gorm:"column:source_title;type:text;not null;default:''"`
+	OCRText     string    `gorm:"column:ocr_text;type:text;not null;default:''"`
+	Summary     string    `gorm:"column:summary;type:text;not null;default:''"`
+	Tag         string    `gorm:"column:tag;type:text;not null;default:'other'"`
+	FieldsJSON  []byte    `gorm:"column:fields_json;type:jsonb;not null"`
+	CreatedAt   time.Time `gorm:"column:created_at;not null"`
+}
+
+func (captureRow) TableName() string {
+	return "captures"
+}
+
+type telegramLinkRow struct {
+	EventID   string     `gorm:"column:event_id;type:text;primaryKey"`
+	UserID    string     `gorm:"column:user_id;type:text;not null"`
+	Status    string     `gorm:"column:status;type:text;not null"`
+	ChatID    string     `gorm:"column:chat_id;type:text;not null;default:''"`
+	CreatedAt time.Time  `gorm:"column:created_at;not null"`
+	LinkedAt  *time.Time `gorm:"column:linked_at"`
+}
+
+func (telegramLinkRow) TableName() string {
+	return "telegram_links"
+}
+
+type telegramChatLinkRow struct {
+	UserID   string    `gorm:"column:user_id;type:text;primaryKey"`
+	ChatID   string    `gorm:"column:chat_id;type:text;not null;unique"`
+	LinkedAt time.Time `gorm:"column:linked_at;not null"`
+}
+
+func (telegramChatLinkRow) TableName() string {
+	return "telegram_chat_links"
+}
+
+type userRow struct {
+	ID           string    `gorm:"column:id;type:text;primaryKey"`
+	Email        string    `gorm:"column:email;type:text;not null;unique"`
+	PasswordHash string    `gorm:"column:password_hash;type:text;not null"`
+	CreatedAt    time.Time `gorm:"column:created_at;not null"`
+}
+
+func (userRow) TableName() string {
+	return "users"
 }
 
 func NewPostgresStore(
@@ -39,146 +93,99 @@ func NewPostgresStore(
 		return nil, fmt.Errorf("postgres dsn is required")
 	}
 
-	db, err := sql.Open("postgres", dsn)
+	if err := runMigrations(dsn); err != nil {
+		return nil, err
+	}
+
+	gdb, err := gorm.Open(gormpostgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		return nil, err
 	}
 
-	db.SetMaxOpenConns(maxOpenConns)
-	db.SetMaxIdleConns(maxIdleConns)
-	db.SetConnMaxLifetime(connMaxLife)
+	sqlDB, err := gdb.DB()
+	if err != nil {
+		return nil, err
+	}
+	sqlDB.SetMaxOpenConns(maxOpenConns)
+	sqlDB.SetMaxIdleConns(maxIdleConns)
+	sqlDB.SetConnMaxLifetime(connMaxLife)
 
-	if err := db.PingContext(ctx); err != nil {
-		_ = db.Close()
+	if err := sqlDB.PingContext(ctx); err != nil {
+		_ = sqlDB.Close()
 		return nil, err
 	}
 
-	s := &PostgresStore{db: db}
-	if err := s.RunMigrations(ctx); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-
-	return s, nil
+	return &PostgresStore{db: gdb}, nil
 }
 
 func (s *PostgresStore) Close() error {
-	return s.db.Close()
+	sqlDB, err := s.db.DB()
+	if err != nil {
+		return err
+	}
+	return sqlDB.Close()
 }
 
-func (s *PostgresStore) RunMigrations(ctx context.Context) error {
-	if _, err := s.db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS snaprecall_schema_migrations (
-			version TEXT PRIMARY KEY,
-			applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-		)
-	`); err != nil {
-		return fmt.Errorf("create migration table: %w", err)
-	}
-
-	files, err := fs.Glob(migrationFS, "migrations/*.sql")
+func runMigrations(dsn string) error {
+	rawDB, err := sql.Open("postgres", dsn)
 	if err != nil {
-		return fmt.Errorf("list migration files: %w", err)
+		return err
 	}
-	sort.Strings(files)
+	defer rawDB.Close()
 
-	for _, path := range files {
-		version := filepath.Base(path)
-		applied, err := s.isMigrationApplied(ctx, version)
-		if err != nil {
-			return fmt.Errorf("check migration %s: %w", version, err)
-		}
-		if applied {
-			continue
-		}
+	driver, err := postgres.WithInstance(rawDB, &postgres.Config{})
+	if err != nil {
+		return fmt.Errorf("create migration db driver: %w", err)
+	}
 
-		sqlBytes, err := migrationFS.ReadFile(path)
-		if err != nil {
-			return fmt.Errorf("read migration %s: %w", version, err)
-		}
+	sourceDriver, err := iofs.New(migrationFS, "migrations")
+	if err != nil {
+		return fmt.Errorf("create migration source driver: %w", err)
+	}
 
-		stmt := strings.TrimSpace(string(sqlBytes))
-		if stmt == "" {
-			continue
-		}
+	m, err := migrate.NewWithInstance("iofs", sourceDriver, "postgres", driver)
+	if err != nil {
+		return fmt.Errorf("create migration runner: %w", err)
+	}
 
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("begin migration tx %s: %w", version, err)
-		}
-
-		if _, err := tx.ExecContext(ctx, stmt); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("apply migration %s: %w", version, err)
-		}
-
-		if _, err := tx.ExecContext(
-			ctx,
-			`INSERT INTO snaprecall_schema_migrations (version, applied_at) VALUES ($1, NOW())`,
-			version,
-		); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("record migration %s: %w", version, err)
-		}
-
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit migration %s: %w", version, err)
-		}
+	upErr := m.Up()
+	sourceErr, dbErr := m.Close()
+	if upErr != nil && !errors.Is(upErr, migrate.ErrNoChange) {
+		return fmt.Errorf("apply migrations: %w", upErr)
+	}
+	if sourceErr != nil {
+		return fmt.Errorf("close migration source: %w", sourceErr)
+	}
+	if dbErr != nil {
+		return fmt.Errorf("close migration db: %w", dbErr)
 	}
 
 	return nil
-}
-
-func (s *PostgresStore) isMigrationApplied(ctx context.Context, version string) (bool, error) {
-	var exists bool
-	if err := s.db.QueryRowContext(
-		ctx,
-		`SELECT EXISTS(SELECT 1 FROM snaprecall_schema_migrations WHERE version = $1)`,
-		version,
-	).Scan(&exists); err != nil {
-		return false, err
-	}
-	return exists, nil
 }
 
 func (s *PostgresStore) SaveCapture(record model.CaptureRecord) error {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultStoreTimeout)
 	defer cancel()
 
-	fields := record.Fields
-	if fields == nil {
-		fields = []model.Field{}
-	}
-
-	fieldsJSON, err := json.Marshal(fields)
+	fieldsJSON, err := marshalFields(record.Fields)
 	if err != nil {
 		return err
 	}
 
-	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO captures (
-			id,
-			user_id,
-			captured_at,
-			source_app,
-			source_title,
-			ocr_text,
-			summary,
-			tag,
-			fields_json
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-	`,
-		record.ID,
-		strings.TrimSpace(record.UserID),
-		record.CapturedAt.UTC(),
-		strings.TrimSpace(record.Source.App),
-		strings.TrimSpace(record.Source.Title),
-		record.OCRText,
-		record.Summary,
-		record.Tag,
-		fieldsJSON,
-	)
-	return err
+	row := captureRow{
+		ID:          record.ID,
+		UserID:      strings.TrimSpace(record.UserID),
+		CapturedAt:  record.CapturedAt.UTC(),
+		SourceApp:   strings.TrimSpace(record.Source.App),
+		SourceTitle: strings.TrimSpace(record.Source.Title),
+		OCRText:     record.OCRText,
+		Summary:     record.Summary,
+		Tag:         record.Tag,
+		FieldsJSON:  fieldsJSON,
+		CreatedAt:   time.Now().UTC(),
+	}
+
+	return s.db.WithContext(ctx).Create(&row).Error
 }
 
 func (s *PostgresStore) ListCaptures(userID string, limit int) []model.CaptureRecord {
@@ -189,103 +196,38 @@ func (s *PostgresStore) ListCaptures(userID string, limit int) []model.CaptureRe
 		limit = 30
 	}
 
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT
-			id,
-			user_id,
-			captured_at,
-			source_app,
-			source_title,
-			ocr_text,
-			summary,
-			tag,
-			fields_json
-		FROM captures
-		WHERE user_id = $1
-		ORDER BY captured_at DESC
-		LIMIT $2
-	`, strings.TrimSpace(userID), limit)
-	if err != nil {
+	var rows []captureRow
+	if err := s.db.WithContext(ctx).
+		Where("user_id = ?", strings.TrimSpace(userID)).
+		Order("captured_at DESC").
+		Limit(limit).
+		Find(&rows).Error; err != nil {
 		return nil
 	}
-	defer rows.Close()
 
-	records := make([]model.CaptureRecord, 0, limit)
-	for rows.Next() {
-		var rec model.CaptureRecord
-		var fieldsRaw []byte
-		if err := rows.Scan(
-			&rec.ID,
-			&rec.UserID,
-			&rec.CapturedAt,
-			&rec.Source.App,
-			&rec.Source.Title,
-			&rec.OCRText,
-			&rec.Summary,
-			&rec.Tag,
-			&fieldsRaw,
-		); err != nil {
-			return records
-		}
-
-		if len(fieldsRaw) > 0 {
-			_ = json.Unmarshal(fieldsRaw, &rec.Fields)
-		}
-		if rec.Fields == nil {
-			rec.Fields = []model.Field{}
-		}
-
-		records = append(records, rec)
+	out := make([]model.CaptureRecord, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, captureRowToModel(row))
 	}
-
-	return records
+	return out
 }
 
 func (s *PostgresStore) GetCapture(id string) (model.CaptureRecord, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultStoreTimeout)
 	defer cancel()
 
-	var rec model.CaptureRecord
-	var fieldsRaw []byte
-	err := s.db.QueryRowContext(ctx, `
-		SELECT
-			id,
-			user_id,
-			captured_at,
-			source_app,
-			source_title,
-			ocr_text,
-			summary,
-			tag,
-			fields_json
-		FROM captures
-		WHERE id = $1
-	`, strings.TrimSpace(id)).Scan(
-		&rec.ID,
-		&rec.UserID,
-		&rec.CapturedAt,
-		&rec.Source.App,
-		&rec.Source.Title,
-		&rec.OCRText,
-		&rec.Summary,
-		&rec.Tag,
-		&fieldsRaw,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
+	var row captureRow
+	err := s.db.WithContext(ctx).
+		Where("id = ?", strings.TrimSpace(id)).
+		Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return model.CaptureRecord{}, false
 	}
 	if err != nil {
 		return model.CaptureRecord{}, false
 	}
 
-	if len(fieldsRaw) > 0 {
-		_ = json.Unmarshal(fieldsRaw, &rec.Fields)
-	}
-	if rec.Fields == nil {
-		rec.Fields = []model.Field{}
-	}
-
-	return rec, true
+	return captureRowToModel(row), true
 }
 
 func (s *PostgresStore) CreateTelegramLink(link model.TelegramLinkStatus) error {
@@ -301,180 +243,251 @@ func (s *PostgresStore) CreateTelegramLink(link model.TelegramLinkStatus) error 
 		createdAt = time.Now().UTC()
 	}
 
-	var linkedAt any
+	var linkedAt *time.Time
 	if link.LinkedAt != nil {
-		linkedAt = link.LinkedAt.UTC()
+		v := link.LinkedAt.UTC()
+		linkedAt = &v
 	}
 
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO telegram_links (
-			event_id,
-			user_id,
-			status,
-			chat_id,
-			created_at,
-			linked_at
-		) VALUES ($1,$2,$3,$4,$5,$6)
-	`,
-		strings.TrimSpace(link.EventID),
-		strings.TrimSpace(link.UserID),
-		status,
-		strings.TrimSpace(link.ChatID),
-		createdAt.UTC(),
-		linkedAt,
-	)
-	return err
+	row := telegramLinkRow{
+		EventID:   strings.TrimSpace(link.EventID),
+		UserID:    strings.TrimSpace(link.UserID),
+		Status:    status,
+		ChatID:    strings.TrimSpace(link.ChatID),
+		CreatedAt: createdAt.UTC(),
+		LinkedAt:  linkedAt,
+	}
+
+	return s.db.WithContext(ctx).Create(&row).Error
 }
 
 func (s *PostgresStore) GetTelegramLink(eventID string) (model.TelegramLinkStatus, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultStoreTimeout)
 	defer cancel()
-	return s.getTelegramLink(ctx, s.db, strings.TrimSpace(eventID), false)
+
+	var row telegramLinkRow
+	err := s.db.WithContext(ctx).
+		Where("event_id = ?", strings.TrimSpace(eventID)).
+		Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return model.TelegramLinkStatus{}, false
+	}
+	if err != nil {
+		return model.TelegramLinkStatus{}, false
+	}
+
+	return telegramLinkRowToModel(row), true
 }
 
 func (s *PostgresStore) ClaimTelegramLink(eventID, chatID string, linkedAt time.Time) (model.TelegramLinkStatus, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultStoreTimeout)
 	defer cancel()
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	normalizedEventID := strings.TrimSpace(eventID)
+	normalizedChatID := strings.TrimSpace(chatID)
+	linkedAtUTC := linkedAt.UTC()
+
+	var out model.TelegramLinkStatus
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var row telegramLinkRow
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("event_id = ?", normalizedEventID).
+			Take(&row).Error; err != nil {
+			return err
+		}
+
+		if row.Status != "linked" {
+			if err := tx.Model(&telegramLinkRow{}).
+				Where("event_id = ?", normalizedEventID).
+				Updates(map[string]any{
+					"status":    "linked",
+					"chat_id":   normalizedChatID,
+					"linked_at": linkedAtUTC,
+				}).Error; err != nil {
+				return err
+			}
+			row.Status = "linked"
+			row.ChatID = normalizedChatID
+			row.LinkedAt = &linkedAtUTC
+		}
+
+		if row.Status == "linked" && strings.TrimSpace(row.ChatID) != "" {
+			chatLink := telegramChatLinkRow{
+				UserID:   row.UserID,
+				ChatID:   row.ChatID,
+				LinkedAt: linkedAtUTC,
+			}
+			if err := tx.Clauses(clause.OnConflict{
+				Columns: []clause.Column{{Name: "user_id"}},
+				DoUpdates: clause.Assignments(map[string]any{
+					"chat_id":   chatLink.ChatID,
+					"linked_at": chatLink.LinkedAt,
+				}),
+			}).Create(&chatLink).Error; err != nil {
+				return err
+			}
+		}
+
+		out = telegramLinkRowToModel(row)
+		return nil
+	})
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return model.TelegramLinkStatus{}, false
+	}
 	if err != nil {
 		return model.TelegramLinkStatus{}, false
 	}
-	defer tx.Rollback()
 
-	normalizedEventID := strings.TrimSpace(eventID)
-	normalizedChatID := strings.TrimSpace(chatID)
-	link, ok := s.getTelegramLink(ctx, tx, normalizedEventID, true)
-	if !ok {
-		return model.TelegramLinkStatus{}, false
-	}
-
-	if link.Status != "linked" {
-		_, err := tx.ExecContext(ctx, `
-			UPDATE telegram_links
-			SET status = 'linked',
-			    chat_id = $2,
-			    linked_at = $3
-			WHERE event_id = $1
-		`, normalizedEventID, normalizedChatID, linkedAt.UTC())
-		if err != nil {
-			return model.TelegramLinkStatus{}, false
-		}
-
-		link.Status = "linked"
-		link.ChatID = normalizedChatID
-		linkedAtUTC := linkedAt.UTC()
-		link.LinkedAt = &linkedAtUTC
-	}
-
-	if link.Status == "linked" && link.ChatID != "" {
-		_, err := tx.ExecContext(ctx, `
-			INSERT INTO telegram_chat_links (
-				user_id,
-				chat_id,
-				linked_at
-			) VALUES ($1,$2,$3)
-			ON CONFLICT (user_id)
-			DO UPDATE SET
-				chat_id = EXCLUDED.chat_id,
-				linked_at = EXCLUDED.linked_at
-		`, link.UserID, link.ChatID, linkedAt.UTC())
-		if err != nil {
-			return model.TelegramLinkStatus{}, false
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return model.TelegramLinkStatus{}, false
-	}
-
-	return link, true
+	return out, true
 }
 
 func (s *PostgresStore) GetTelegramChatIDByUser(userID string) (string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultStoreTimeout)
 	defer cancel()
 
-	var chatID string
-	err := s.db.QueryRowContext(
-		ctx,
-		`SELECT chat_id FROM telegram_chat_links WHERE user_id = $1`,
-		strings.TrimSpace(userID),
-	).Scan(&chatID)
-	if errors.Is(err, sql.ErrNoRows) {
+	var row telegramChatLinkRow
+	err := s.db.WithContext(ctx).
+		Select("chat_id").
+		Where("user_id = ?", strings.TrimSpace(userID)).
+		Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return "", false
 	}
 	if err != nil {
 		return "", false
 	}
-	return chatID, true
+
+	return row.ChatID, true
 }
 
 func (s *PostgresStore) GetUserIDByTelegramChatID(chatID string) (string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultStoreTimeout)
 	defer cancel()
 
-	var userID string
-	err := s.db.QueryRowContext(
-		ctx,
-		`SELECT user_id FROM telegram_chat_links WHERE chat_id = $1`,
-		strings.TrimSpace(chatID),
-	).Scan(&userID)
-	if errors.Is(err, sql.ErrNoRows) {
+	var row telegramChatLinkRow
+	err := s.db.WithContext(ctx).
+		Select("user_id").
+		Where("chat_id = ?", strings.TrimSpace(chatID)).
+		Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return "", false
 	}
 	if err != nil {
 		return "", false
 	}
-	return userID, true
+
+	return row.UserID, true
 }
 
-type rowQueryer interface {
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
-}
+func (s *PostgresStore) CreateUser(user model.UserAuth) error {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultStoreTimeout)
+	defer cancel()
 
-func (s *PostgresStore) getTelegramLink(
-	ctx context.Context,
-	q rowQueryer,
-	eventID string,
-	forUpdate bool,
-) (model.TelegramLinkStatus, bool) {
-	query := `
-		SELECT
-			event_id,
-			user_id,
-			status,
-			chat_id,
-			created_at,
-			linked_at
-		FROM telegram_links
-		WHERE event_id = $1
-	`
-	if forUpdate {
-		query += " FOR UPDATE"
+	row := userRow{
+		ID:           strings.TrimSpace(user.ID),
+		Email:        strings.ToLower(strings.TrimSpace(user.Email)),
+		PasswordHash: user.PasswordHash,
+		CreatedAt:    user.CreatedAt.UTC(),
 	}
 
-	var link model.TelegramLinkStatus
-	var linkedAt sql.NullTime
-	err := q.QueryRowContext(ctx, query, eventID).Scan(
-		&link.EventID,
-		&link.UserID,
-		&link.Status,
-		&link.ChatID,
-		&link.CreatedAt,
-		&linkedAt,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return model.TelegramLinkStatus{}, false
+	return s.db.WithContext(ctx).Create(&row).Error
+}
+
+func (s *PostgresStore) GetUserByEmail(email string) (model.UserAuth, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultStoreTimeout)
+	defer cancel()
+
+	var row userRow
+	err := s.db.WithContext(ctx).
+		Where("email = ?", strings.ToLower(strings.TrimSpace(email))).
+		Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return model.UserAuth{}, false
 	}
 	if err != nil {
-		return model.TelegramLinkStatus{}, false
+		return model.UserAuth{}, false
 	}
 
-	if linkedAt.Valid {
-		t := linkedAt.Time.UTC()
-		link.LinkedAt = &t
+	return model.UserAuth{
+		ID:           row.ID,
+		Email:        row.Email,
+		PasswordHash: row.PasswordHash,
+		CreatedAt:    row.CreatedAt.UTC(),
+	}, true
+}
+
+func (s *PostgresStore) GetUserByID(userID string) (model.UserAuth, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultStoreTimeout)
+	defer cancel()
+
+	var row userRow
+	err := s.db.WithContext(ctx).
+		Where("id = ?", strings.TrimSpace(userID)).
+		Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return model.UserAuth{}, false
+	}
+	if err != nil {
+		return model.UserAuth{}, false
 	}
 
-	return link, true
+	return model.UserAuth{
+		ID:           row.ID,
+		Email:        row.Email,
+		PasswordHash: row.PasswordHash,
+		CreatedAt:    row.CreatedAt.UTC(),
+	}, true
+}
+
+func captureRowToModel(row captureRow) model.CaptureRecord {
+	return model.CaptureRecord{
+		ID:         row.ID,
+		UserID:     row.UserID,
+		CapturedAt: row.CapturedAt.UTC(),
+		Source: model.SourceMeta{
+			App:   row.SourceApp,
+			Title: row.SourceTitle,
+		},
+		OCRText: row.OCRText,
+		Summary: row.Summary,
+		Tag:     row.Tag,
+		Fields:  unmarshalFields(row.FieldsJSON),
+	}
+}
+
+func telegramLinkRowToModel(row telegramLinkRow) model.TelegramLinkStatus {
+	out := model.TelegramLinkStatus{
+		EventID:   row.EventID,
+		UserID:    row.UserID,
+		Status:    row.Status,
+		ChatID:    row.ChatID,
+		CreatedAt: row.CreatedAt.UTC(),
+	}
+	if row.LinkedAt != nil {
+		v := row.LinkedAt.UTC()
+		out.LinkedAt = &v
+	}
+	return out
+}
+
+func marshalFields(fields []model.Field) ([]byte, error) {
+	if fields == nil {
+		fields = []model.Field{}
+	}
+	return json.Marshal(fields)
+}
+
+func unmarshalFields(raw []byte) []model.Field {
+	if len(raw) == 0 {
+		return []model.Field{}
+	}
+
+	var fields []model.Field
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return []model.Field{}
+	}
+	if fields == nil {
+		return []model.Field{}
+	}
+	return fields
 }

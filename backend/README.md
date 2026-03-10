@@ -5,6 +5,7 @@ Minimal MVP backend for:
 - Q&A retrieval (`/v1/query`)
 - Telegram push notifications
 - Telegram event-ID linking (`/v1/integrations/telegram/*`)
+- Account auth (`/v1/auth/*`)
 
 ## 1) Setup
 ```bash
@@ -17,6 +18,7 @@ Fill in:
 - `TELEGRAM_API_BASE_URL` (optional, defaults to Telegram official API)
 - `TELEGRAM_DEFAULT_CHAT_ID` (optional fallback)
 - `POSTGRES_DSN` or `DATABASE_URL` (required for persistent storage)
+- `AUTH_JWT_SECRET` (required for login/session token signing)
 
 Supabase DSN format example:
 `postgresql://postgres.<project-ref>:<password>@aws-1-ap-south-1.pooler.supabase.com:5432/postgres?sslmode=require`
@@ -36,11 +38,34 @@ The backend auto-loads `.env` (tries `backend/.env` then `../.env`).
 4. Backend polling worker claims link and maps `user_id` -> `chat_id`.
 5. Desktop polls `GET /v1/integrations/telegram/status?event_id=...` until status is `linked`.
 
+For logged-in users, Telegram link state can be checked with:
+- `GET /v1/integrations/telegram/me` (requires `Authorization: Bearer <token>`)
+
 After linking, Telegram chat supports:
 - send plain text question directly
 - or send `/ask <question>`
 
 ## 4) API quick test
+Register user:
+```bash
+curl -X POST http://localhost:8080/v1/auth/register \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "email":"you@example.com",
+    "password":"supersecret123"
+  }'
+```
+
+Login user:
+```bash
+curl -X POST http://localhost:8080/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "email":"you@example.com",
+    "password":"supersecret123"
+  }'
+```
+
 Create capture:
 ```bash
 curl -X POST http://localhost:8080/v1/captures \
@@ -78,6 +103,8 @@ curl -X POST http://localhost:8080/v1/query \
 
 ## Notes
 - If `POSTGRES_DSN`/`DATABASE_URL` is set, backend auto-runs migrations and persists captures/linking data in Postgres.
+- Postgres persistence uses `gorm` for queries and `golang-migrate` for versioned migrations (`backend/internal/store/migrations`).
+- Auth uses JWT bearer tokens (`Authorization: Bearer <token>`).
 - If no Postgres DSN is set, backend falls back to in-memory store.
 - Supports either `ocr_text` or `image_base64`.
 - Keep secrets in `.env` only.

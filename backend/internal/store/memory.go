@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +16,8 @@ type MemoryStore struct {
 	telegramLinks      map[string]model.TelegramLinkStatus
 	telegramChatByUser map[string]string
 	telegramUserByChat map[string]string
+	usersByID          map[string]model.UserAuth
+	usersByEmail       map[string]string
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -24,6 +27,8 @@ func NewMemoryStore() *MemoryStore {
 		telegramLinks:      make(map[string]model.TelegramLinkStatus),
 		telegramChatByUser: make(map[string]string),
 		telegramUserByChat: make(map[string]string),
+		usersByID:          make(map[string]model.UserAuth),
+		usersByEmail:       make(map[string]string),
 	}
 }
 
@@ -122,4 +127,50 @@ func (s *MemoryStore) GetUserIDByTelegramChatID(chatID string) (string, bool) {
 
 	userID, ok := s.telegramUserByChat[chatID]
 	return userID, ok
+}
+
+func (s *MemoryStore) CreateUser(user model.UserAuth) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	email := strings.ToLower(strings.TrimSpace(user.Email))
+	if email == "" {
+		return fmt.Errorf("email is required")
+	}
+	if user.ID == "" {
+		return fmt.Errorf("user id is required")
+	}
+	if _, exists := s.usersByID[user.ID]; exists {
+		return fmt.Errorf("duplicate user id")
+	}
+	if _, exists := s.usersByEmail[email]; exists {
+		return fmt.Errorf("duplicate email")
+	}
+
+	user.Email = email
+	s.usersByID[user.ID] = user
+	s.usersByEmail[email] = user.ID
+	return nil
+}
+
+func (s *MemoryStore) GetUserByEmail(email string) (model.UserAuth, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	normalized := strings.ToLower(strings.TrimSpace(email))
+	userID, ok := s.usersByEmail[normalized]
+	if !ok {
+		return model.UserAuth{}, false
+	}
+
+	user, ok := s.usersByID[userID]
+	return user, ok
+}
+
+func (s *MemoryStore) GetUserByID(userID string) (model.UserAuth, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	user, ok := s.usersByID[strings.TrimSpace(userID)]
+	return user, ok
 }

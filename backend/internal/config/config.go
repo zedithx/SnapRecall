@@ -24,6 +24,8 @@ type Config struct {
 	TelegramBotToken      string
 	TelegramAPIBaseURL    string
 	TelegramDefaultChatID string
+	AuthJWTSecret         string
+	AuthTokenTTL          time.Duration
 	EncryptionKey         string
 }
 
@@ -45,6 +47,8 @@ func Load() (*Config, error) {
 		TelegramBotToken:      os.Getenv("TELEGRAM_BOT_TOKEN"),
 		TelegramAPIBaseURL:    getOrDefault("TELEGRAM_API_BASE_URL", "https://api.telegram.org"),
 		TelegramDefaultChatID: os.Getenv("TELEGRAM_DEFAULT_CHAT_ID"),
+		AuthJWTSecret:         os.Getenv("AUTH_JWT_SECRET"),
+		AuthTokenTTL:          time.Duration(getIntOrDefault("AUTH_TOKEN_TTL_HOURS", 24*30)) * time.Hour,
 		EncryptionKey:         os.Getenv("ENCRYPTION_KEY"),
 	}
 
@@ -53,6 +57,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.TelegramBotToken == "" {
 		return nil, fmt.Errorf("missing TELEGRAM_BOT_TOKEN")
+	}
+	if cfg.AuthJWTSecret == "" {
+		return nil, fmt.Errorf("missing AUTH_JWT_SECRET")
 	}
 
 	return cfg, nil

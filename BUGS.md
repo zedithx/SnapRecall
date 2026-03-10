@@ -58,3 +58,25 @@ Use this file to record each bug in a consistent format.
 - **Status:** Resolved
 - **Owner:** Codex
 - **Notes:** Message template also removed `Source` and `Captured` fields as requested.
+
+## Bug 005
+- **Date:** 2026-03-10
+- **Bug/Error:** Returning users could not reliably see existing Telegram link state after login, making reintegration appear necessary.
+- **Impact:** Confusing UX and repeated integration attempts even when account already had a linked chat.
+- **Reproduction Steps:** Login with an account that already has `telegram_chat_links` data; desktop still shows integration CTA without checking account-level status.
+- **Root Cause:** Frontend only tracked event-based link polling and had no authenticated endpoint to fetch current account linkage status.
+- **Resolution Method:** Added backend endpoint `GET /v1/integrations/telegram/me` and frontend auto-check on login/startup; `StartTelegramLink` now returns linked state immediately for already-linked accounts.
+- **Status:** Resolved
+- **Owner:** Codex
+- **Notes:** Added service tests covering auth, link status, and linked-chat notification routing.
+
+## Bug 006
+- **Date:** 2026-03-10
+- **Bug/Error:** Desktop app failed to start and lint with syntax/parsing errors caused by unresolved merge conflict markers.
+- **Impact:** `App.jsx` and Electron runtime files were not parseable, blocking app startup and frontend lint checks.
+- **Reproduction Steps:** Run `cd desktop && npm run lint` or start the desktop app with unresolved conflict markers in source files.
+- **Root Cause:** Merge conflict sections (`<<<<<<<`, `=======`, `>>>>>>>`) were committed in `src/App.jsx`, `electron/main.cjs`, and `electron/preload.cjs`.
+- **Resolution Method:** Replaced conflict-marked files with clean, syntactically valid implementations, then validated with `npm run lint`, `npm run build`, and `node -c` checks for Electron files.
+- **Status:** Resolved
+- **Owner:** Codex
+- **Notes:** Also cleaned `desktop/README.md` conflict artifacts to prevent future confusion.

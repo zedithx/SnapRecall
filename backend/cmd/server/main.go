@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"importanttracker/backend/internal/ai"
+	"importanttracker/backend/internal/auth"
 	"importanttracker/backend/internal/config"
 	"importanttracker/backend/internal/model"
 	"importanttracker/backend/internal/service"
@@ -32,6 +33,10 @@ func main() {
 	aiClient := ai.NewOpenAIClient(cfg.OpenAIAPIKey, cfg.OpenAIModel, cfg.OpenAIBaseURL, cfg.RequestTimeout)
 	tgClient := telegram.NewClient(cfg.TelegramBotToken, cfg.TelegramAPIBaseURL, cfg.RequestTimeout)
 	svc := service.New(aiClient, captureStore, tgClient, cfg.TelegramDefaultChatID)
+	authManager, err := auth.NewManager(cfg.AuthJWTSecret, cfg.AuthTokenTTL)
+	if err != nil {
+		log.Fatalf("failed to initialize auth manager: %v", err)
+	}
 
 	botUsername := ""
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.RequestTimeout)
@@ -49,6 +54,100 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	})
 
+	mux.HandleFunc("/v1/auth/register", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+
+		var in model.AuthRegisterInput
+		if err := decodeJSON(r, &in); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), cfg.RequestTimeout)
+		defer cancel()
+
+		user, err := svc.RegisterUser(ctx, in)
+		if err != nil {
+			status := http.StatusBadRequest
+			if strings.Contains(strings.ToLower(err.Error()), "already registered") {
+				status = http.StatusConflict
+			}
+			writeJSON(w, status, map[string]string{"error": err.Error()})
+			return
+		}
+
+		token, err := authManager.GenerateToken(user.UserID, user.Email)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create auth token"})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, model.AuthResponse{
+			Token: token,
+			User:  user,
+		})
+	})
+
+	mux.HandleFunc("/v1/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+
+		var in model.AuthLoginInput
+		if err := decodeJSON(r, &in); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), cfg.RequestTimeout)
+		defer cancel()
+
+		user, err := svc.AuthenticateUser(ctx, in)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+
+		token, err := authManager.GenerateToken(user.UserID, user.Email)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create auth token"})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, model.AuthResponse{
+			Token: token,
+			User:  user,
+		})
+	})
+
+	mux.HandleFunc("/v1/auth/me", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+
+		claims, err := requireAuthClaims(r, authManager)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), cfg.RequestTimeout)
+		defer cancel()
+
+		user, err := svc.GetUserProfile(ctx, claims.UserID)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{"user": user})
+	})
+
 	mux.HandleFunc("/v1/captures", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -59,6 +158,12 @@ func main() {
 		if err := decodeJSON(r, &in); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
+		}
+		if claims, err := optionalAuthClaims(r, authManager); err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		} else if claims != nil {
+			in.UserID = claims.UserID
 		}
 
 		ctx, cancel := context.WithTimeout(r.Context(), cfg.RequestTimeout)
@@ -95,6 +200,12 @@ func main() {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
+		if claims, err := optionalAuthClaims(r, authManager); err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		} else if claims != nil {
+			in.UserID = claims.UserID
+		}
 
 		ctx, cancel := context.WithTimeout(r.Context(), cfg.RequestTimeout)
 		defer cancel()
@@ -119,6 +230,12 @@ func main() {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
+		if claims, err := optionalAuthClaims(r, authManager); err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		} else if claims != nil {
+			in.UserID = claims.UserID
+		}
 
 		link, err := svc.StartTelegramLink(in.UserID)
 		if err != nil {
@@ -133,6 +250,27 @@ func main() {
 			"created_at":   link.CreatedAt,
 			"bot_username": botUsername,
 		})
+	})
+
+	mux.HandleFunc("/v1/integrations/telegram/me", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+
+		claims, err := requireAuthClaims(r, authManager)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+
+		status, err := svc.GetTelegramIntegrationStatus(claims.UserID)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, status)
 	})
 
 	mux.HandleFunc("/v1/integrations/telegram/status", func(w http.ResponseWriter, r *http.Request) {
@@ -271,4 +409,43 @@ func withCORS(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+func optionalAuthClaims(r *http.Request, authManager *auth.Manager) (*auth.Claims, error) {
+	token := extractBearerToken(r.Header.Get("Authorization"))
+	if token == "" {
+		return nil, nil
+	}
+
+	claims, err := authManager.ParseToken(token)
+	if err != nil {
+		return nil, fmt.Errorf("invalid auth token")
+	}
+	return &claims, nil
+}
+
+func requireAuthClaims(r *http.Request, authManager *auth.Manager) (auth.Claims, error) {
+	token := extractBearerToken(r.Header.Get("Authorization"))
+	if token == "" {
+		return auth.Claims{}, fmt.Errorf("authorization required")
+	}
+
+	claims, err := authManager.ParseToken(token)
+	if err != nil {
+		return auth.Claims{}, fmt.Errorf("invalid auth token")
+	}
+	return claims, nil
+}
+
+func extractBearerToken(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return ""
+	}
+
+	const prefix = "bearer "
+	if strings.HasPrefix(strings.ToLower(value), prefix) {
+		return strings.TrimSpace(value[len(prefix):])
+	}
+	return ""
 }

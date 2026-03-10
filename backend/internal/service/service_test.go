@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"importanttracker/backend/internal/ai"
 	"importanttracker/backend/internal/model"
@@ -25,12 +27,14 @@ func (s stubAnalyzer) AnswerQuestion(context.Context, string, []model.CaptureRec
 type countingNotifier struct {
 	mu    sync.Mutex
 	calls int
+	chats []string
 }
 
-func (n *countingNotifier) SendCaptureSummary(context.Context, string, model.CaptureRecord) error {
+func (n *countingNotifier) SendCaptureSummary(_ context.Context, chatID string, _ model.CaptureRecord) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.calls++
+	n.chats = append(n.chats, chatID)
 	return nil
 }
 
@@ -38,6 +42,16 @@ func (n *countingNotifier) Count() int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.calls
+}
+
+func (n *countingNotifier) LastChatID() string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if len(n.chats) == 0 {
+		return ""
+	}
+	return n.chats[len(n.chats)-1]
 }
 
 func TestProcessCapture_DedupesRapidTelegramNotification(t *testing.T) {
@@ -84,5 +98,137 @@ func TestProcessCapture_DedupesRapidTelegramNotification(t *testing.T) {
 
 	if got := len(svc.store.ListCaptures("u_test", 10)); got != 2 {
 		t.Fatalf("expected both captures to be saved, got %d", got)
+	}
+}
+
+func TestRegisterAuthenticateAndLoadUserProfile(t *testing.T) {
+	svc := New(
+		stubAnalyzer{},
+		store.NewMemoryStore(),
+		&countingNotifier{},
+		"",
+	)
+
+	user, err := svc.RegisterUser(context.Background(), model.AuthRegisterInput{
+		Email:    "User@Example.com",
+		Password: "supersecret123",
+	})
+	if err != nil {
+		t.Fatalf("RegisterUser returned error: %v", err)
+	}
+	if user.UserID == "" {
+		t.Fatalf("expected user id to be set")
+	}
+	if user.Email != "user@example.com" {
+		t.Fatalf("expected normalized email user@example.com, got %q", user.Email)
+	}
+
+	_, err = svc.RegisterUser(context.Background(), model.AuthRegisterInput{
+		Email:    "user@example.com",
+		Password: "anothersecret123",
+	})
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "already registered") {
+		t.Fatalf("expected duplicate email error, got %v", err)
+	}
+
+	authUser, err := svc.AuthenticateUser(context.Background(), model.AuthLoginInput{
+		Email:    "USER@example.com",
+		Password: "supersecret123",
+	})
+	if err != nil {
+		t.Fatalf("AuthenticateUser returned error: %v", err)
+	}
+	if authUser.UserID != user.UserID {
+		t.Fatalf("expected same user id, got %q vs %q", authUser.UserID, user.UserID)
+	}
+
+	_, err = svc.AuthenticateUser(context.Background(), model.AuthLoginInput{
+		Email:    "user@example.com",
+		Password: "wrong-password",
+	})
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "invalid email or password") {
+		t.Fatalf("expected invalid credentials error, got %v", err)
+	}
+
+	profile, err := svc.GetUserProfile(context.Background(), user.UserID)
+	if err != nil {
+		t.Fatalf("GetUserProfile returned error: %v", err)
+	}
+	if profile.Email != user.Email {
+		t.Fatalf("expected profile email %q, got %q", user.Email, profile.Email)
+	}
+}
+
+func TestTelegramLinkAndCaptureUseLinkedChat(t *testing.T) {
+	mem := store.NewMemoryStore()
+	notifier := &countingNotifier{}
+	svc := New(
+		stubAnalyzer{
+			analysis: ai.CaptureAnalysis{
+				Summary: "Flight SQ123 departs at 08:00.",
+				Tag:     "flight",
+				Fields:  []model.Field{{Type: "time", Value: "08:00", Confidence: 0.9}},
+				OCRText: "Flight SQ123 08:00",
+			},
+		},
+		mem,
+		notifier,
+		"",
+	)
+
+	userID := "usr_linked"
+	link, err := svc.StartTelegramLink(userID)
+	if err != nil {
+		t.Fatalf("StartTelegramLink returned error: %v", err)
+	}
+	if link.Status != "pending" || link.EventID == "" {
+		t.Fatalf("expected pending link with event id, got %+v", link)
+	}
+
+	claimed, ok := svc.TryCompleteTelegramLink(link.EventID, "chat_123")
+	if !ok {
+		t.Fatalf("expected TryCompleteTelegramLink to succeed")
+	}
+	if claimed.Status != "linked" {
+		t.Fatalf("expected linked status, got %q", claimed.Status)
+	}
+
+	status, err := svc.GetTelegramIntegrationStatus(userID)
+	if err != nil {
+		t.Fatalf("GetTelegramIntegrationStatus returned error: %v", err)
+	}
+	if status.Status != "linked" || status.ChatID != "chat_123" {
+		t.Fatalf("unexpected status %+v", status)
+	}
+
+	again, err := svc.StartTelegramLink(userID)
+	if err != nil {
+		t.Fatalf("StartTelegramLink second call returned error: %v", err)
+	}
+	if again.Status != "linked" || again.ChatID != "chat_123" {
+		t.Fatalf("expected existing linked status, got %+v", again)
+	}
+
+	_, warning, err := svc.ProcessCapture(context.Background(), model.CaptureInput{
+		UserID:  userID,
+		OCRText: "Flight SQ123 08:00",
+	})
+	if err != nil {
+		t.Fatalf("ProcessCapture returned error: %v", err)
+	}
+	if warning != "" {
+		t.Fatalf("expected no warning, got %q", warning)
+	}
+
+	if notifier.Count() != 1 {
+		t.Fatalf("expected 1 Telegram notification, got %d", notifier.Count())
+	}
+	if notifier.LastChatID() != "chat_123" {
+		t.Fatalf("expected notification to linked chat_123, got %q", notifier.LastChatID())
+	}
+
+	linkedAt := claimed.LinkedAt
+	if linkedAt == nil || linkedAt.IsZero() || linkedAt.After(time.Now().UTC().Add(2*time.Second)) {
+		t.Fatalf("expected reasonable linked_at timestamp, got %v", linkedAt)
 	}
 }

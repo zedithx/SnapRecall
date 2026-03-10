@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
 	"importanttracker/backend/internal/ai"
 	"importanttracker/backend/internal/model"
 )
@@ -30,6 +31,9 @@ type CaptureStore interface {
 	ClaimTelegramLink(eventID, chatID string, linkedAt time.Time) (model.TelegramLinkStatus, bool)
 	GetTelegramChatIDByUser(userID string) (string, bool)
 	GetUserIDByTelegramChatID(chatID string) (string, bool)
+	CreateUser(user model.UserAuth) error
+	GetUserByEmail(email string) (model.UserAuth, bool)
+	GetUserByID(userID string) (model.UserAuth, bool)
 }
 
 type TelegramNotifier interface {
@@ -111,6 +115,81 @@ func (s *Service) ProcessCapture(ctx context.Context, in model.CaptureInput) (mo
 	return record, warning, nil
 }
 
+func (s *Service) RegisterUser(ctx context.Context, in model.AuthRegisterInput) (model.UserProfile, error) {
+	_ = ctx
+
+	email, err := normalizeEmail(in.Email)
+	if err != nil {
+		return model.UserProfile{}, err
+	}
+
+	password := in.Password
+	if len(password) < 8 {
+		return model.UserProfile{}, fmt.Errorf("password must be at least 8 characters")
+	}
+
+	if _, exists := s.store.GetUserByEmail(email); exists {
+		return model.UserProfile{}, fmt.Errorf("email already registered")
+	}
+
+	hashed, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return model.UserProfile{}, fmt.Errorf("hash password: %w", err)
+	}
+
+	user := model.UserAuth{
+		ID:           generateUserID(),
+		Email:        email,
+		PasswordHash: string(hashed),
+		CreatedAt:    time.Now().UTC(),
+	}
+	if err := s.store.CreateUser(user); err != nil {
+		errText := strings.ToLower(err.Error())
+		if strings.Contains(errText, "duplicate") || strings.Contains(errText, "unique") {
+			return model.UserProfile{}, fmt.Errorf("email already registered")
+		}
+		return model.UserProfile{}, fmt.Errorf("create user: %w", err)
+	}
+
+	return toUserProfile(user), nil
+}
+
+func (s *Service) AuthenticateUser(ctx context.Context, in model.AuthLoginInput) (model.UserProfile, error) {
+	_ = ctx
+
+	email, err := normalizeEmail(in.Email)
+	if err != nil {
+		return model.UserProfile{}, err
+	}
+
+	user, ok := s.store.GetUserByEmail(email)
+	if !ok {
+		return model.UserProfile{}, fmt.Errorf("invalid email or password")
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(in.Password)); err != nil {
+		return model.UserProfile{}, fmt.Errorf("invalid email or password")
+	}
+
+	return toUserProfile(user), nil
+}
+
+func (s *Service) GetUserProfile(ctx context.Context, userID string) (model.UserProfile, error) {
+	_ = ctx
+
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return model.UserProfile{}, fmt.Errorf("user_id is required")
+	}
+
+	user, ok := s.store.GetUserByID(userID)
+	if !ok {
+		return model.UserProfile{}, fmt.Errorf("user not found")
+	}
+
+	return toUserProfile(user), nil
+}
+
 func (s *Service) AnswerQuestion(ctx context.Context, in model.QueryInput) (model.QueryAnswer, error) {
 	if strings.TrimSpace(in.UserID) == "" {
 		return model.QueryAnswer{}, fmt.Errorf("user_id is required")
@@ -147,15 +226,26 @@ func (s *Service) AnswerQuestion(ctx context.Context, in model.QueryInput) (mode
 }
 
 func (s *Service) StartTelegramLink(userID string) (model.TelegramLinkStatus, error) {
-	if strings.TrimSpace(userID) == "" {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
 		return model.TelegramLinkStatus{}, fmt.Errorf("user_id is required")
+	}
+	if linkedChatID, linked := s.store.GetTelegramChatIDByUser(userID); linked {
+		now := time.Now().UTC()
+		return model.TelegramLinkStatus{
+			UserID:    userID,
+			Status:    "linked",
+			ChatID:    linkedChatID,
+			CreatedAt: now,
+			LinkedAt:  &now,
+		}, nil
 	}
 
 	for attempt := 0; attempt < 5; attempt++ {
 		eventID := generateTelegramEventID()
 		link := model.TelegramLinkStatus{
 			EventID:   eventID,
-			UserID:    strings.TrimSpace(userID),
+			UserID:    userID,
 			Status:    "pending",
 			CreatedAt: time.Now().UTC(),
 		}
@@ -166,6 +256,25 @@ func (s *Service) StartTelegramLink(userID string) (model.TelegramLinkStatus, er
 	}
 
 	return model.TelegramLinkStatus{}, fmt.Errorf("failed to create telegram link event")
+}
+
+func (s *Service) GetTelegramIntegrationStatus(userID string) (model.TelegramIntegrationStatus, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return model.TelegramIntegrationStatus{}, fmt.Errorf("user_id is required")
+	}
+
+	status := model.TelegramIntegrationStatus{
+		UserID: userID,
+		Status: "not_linked",
+	}
+
+	if chatID, linked := s.store.GetTelegramChatIDByUser(userID); linked {
+		status.Status = "linked"
+		status.ChatID = chatID
+	}
+
+	return status, nil
 }
 
 func (s *Service) GetTelegramLinkStatus(eventID string) (model.TelegramLinkStatus, error) {
@@ -264,6 +373,33 @@ func generateTelegramEventID() string {
 		return fmt.Sprintf("EVT-%06d", time.Now().UnixNano()%1000000)
 	}
 	return "EVT-" + strings.ToUpper(hex.EncodeToString(buf))
+}
+
+func generateUserID() string {
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("usr_%d", time.Now().UnixNano())
+	}
+	return "usr_" + hex.EncodeToString(buf)
+}
+
+func normalizeEmail(raw string) (string, error) {
+	email := strings.ToLower(strings.TrimSpace(raw))
+	if email == "" {
+		return "", fmt.Errorf("email is required")
+	}
+	if !strings.Contains(email, "@") {
+		return "", fmt.Errorf("email is invalid")
+	}
+	return email, nil
+}
+
+func toUserProfile(user model.UserAuth) model.UserProfile {
+	return model.UserProfile{
+		UserID:    user.ID,
+		Email:     user.Email,
+		CreatedAt: user.CreatedAt.UTC(),
+	}
 }
 
 func (s *Service) shouldSendCaptureNotification(chatID string, record model.CaptureRecord) bool {

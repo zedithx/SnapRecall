@@ -1,11 +1,14 @@
 # SnapRecall Desktop (Electron + React)
 
-## What this MVP does
-- Uses backend `http://localhost:8080` by default.
+## What this app does
+- Uses backend from `VITE_API_BASE_URL` (defaults to `http://localhost:8080`).
+- Supports account register/login with persisted session token.
+- Requires login for capture, ask, and Telegram integration.
+- Supports two layouts: `Command Workspace` and `Bubble Mode`.
+- In Bubble Mode, the app can collapse to a small floating bubble and expand on click.
 - Global shortcut triggers quick capture and save.
 - Telegram integration uses one button that generates an event ID.
-- User starts the Telegram bot, sends the event ID, and the app auto-detects link status.
-- Supports Q&A through backend `/v1/query`.
+- Once linked for a logged-in account, future logins reuse that Telegram link.
 
 ## 1) Install
 ```bash
@@ -18,10 +21,9 @@ npm install
 cp .env.example .env
 ```
 
-Default value:
+Defaults:
 - `CAPTURE_SHORTCUT=CommandOrControl+Shift+S`
-
-You can still override shortcut at runtime in the app; UI-saved value takes precedence after first save.
+- `VITE_API_BASE_URL=http://localhost:8080`
 
 ## 3) Run dev mode
 ```bash
@@ -29,6 +31,18 @@ cd desktop
 npm run dev
 ```
 
+## 4) Package installers
+```bash
+cd desktop
+npm run dist
+```
+
+Platform-specific:
+```bash
+npm run dist:mac
+npm run dist:win
+```
+
 ## Notes
 - Screen capture uses Electron `desktopCapturer` and may require OS screen recording permission.
-- Current capture is full-screen primary display; region crop can be added as the next step.
+- Current capture is full-screen primary display.

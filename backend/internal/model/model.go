@@ -57,3 +57,37 @@ type TelegramLinkStatus struct {
 	CreatedAt time.Time  `json:"created_at"`
 	LinkedAt  *time.Time `json:"linked_at,omitempty"`
 }
+
+type TelegramIntegrationStatus struct {
+	UserID string `json:"user_id"`
+	Status string `json:"status"`
+	ChatID string `json:"chat_id,omitempty"`
+}
+
+type UserAuth struct {
+	ID           string
+	Email        string
+	PasswordHash string
+	CreatedAt    time.Time
+}
+
+type UserProfile struct {
+	UserID    string    `json:"user_id"`
+	Email     string    `json:"email"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type AuthRegisterInput struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+type AuthLoginInput struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+type AuthResponse struct {
+	Token string      `json:"token"`
+	User  UserProfile `json:"user"`
+}
