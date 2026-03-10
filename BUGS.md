@@ -47,3 +47,14 @@ Use this file to record each bug in a consistent format.
 - **Status:** Resolved
 - **Owner:** Codex
 - **Notes:** Verified with live preflight test (`OPTIONS /v1/query`) and successful capture/query requests.
+
+## Bug 004
+- **Date:** 2026-03-10
+- **Bug/Error:** Telegram summary notifications could be sent twice for rapid duplicate captures.
+- **Impact:** Users received duplicate summary messages in Telegram for a single intended capture action.
+- **Reproduction Steps:** Trigger two near-identical capture requests in quick succession and observe Telegram chat output.
+- **Root Cause:** Notification dispatch did not include short-window deduplication for repeated identical capture summaries.
+- **Resolution Method:** Added a 15-second in-memory dedupe gate in service layer keyed by `chat_id + tag + summary` and added regression tests for service and message formatting.
+- **Status:** Resolved
+- **Owner:** Codex
+- **Notes:** Message template also removed `Source` and `Captured` fields as requested.
