@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -27,6 +28,10 @@ import (
 const (
 	defaultStoreTimeout     = 10 * time.Second
 	defaultSlowSQLThreshold = 300 * time.Millisecond
+
+	captureSelectColumns       = "id,user_id,captured_at,source_app,source_title,ocr_text,summary,tag,fields_json"
+	recentCaptureSelectColumns = "id,user_id,captured_at,source_app,source_title,summary,tag,fields_json"
+	userSelectColumns          = "id,email,password_hash,created_at"
 )
 
 //go:embed migrations/*.sql
@@ -36,17 +41,55 @@ type PostgresStore struct {
 	db *gorm.DB
 }
 
+type jsonbPayload []byte
+
+func (p jsonbPayload) Value() (driver.Value, error) {
+	if len(p) == 0 {
+		return "[]", nil
+	}
+	if !json.Valid(p) {
+		return nil, fmt.Errorf("invalid jsonb payload")
+	}
+	return string(p), nil
+}
+
+func (p *jsonbPayload) Scan(value any) error {
+	switch v := value.(type) {
+	case nil:
+		*p = jsonbPayload([]byte("[]"))
+		return nil
+	case []byte:
+		if len(v) == 0 {
+			*p = jsonbPayload([]byte("[]"))
+			return nil
+		}
+		out := make([]byte, len(v))
+		copy(out, v)
+		*p = jsonbPayload(out)
+		return nil
+	case string:
+		if strings.TrimSpace(v) == "" {
+			*p = jsonbPayload([]byte("[]"))
+			return nil
+		}
+		*p = jsonbPayload([]byte(v))
+		return nil
+	default:
+		return fmt.Errorf("unsupported jsonb payload type %T", value)
+	}
+}
+
 type captureRow struct {
-	ID          string    `gorm:"column:id;type:text;primaryKey"`
-	UserID      string    `gorm:"column:user_id;type:text;not null"`
-	CapturedAt  time.Time `gorm:"column:captured_at;not null"`
-	SourceApp   string    `gorm:"column:source_app;type:text;not null;default:''"`
-	SourceTitle string    `gorm:"column:source_title;type:text;not null;default:''"`
-	OCRText     string    `gorm:"column:ocr_text;type:text;not null;default:''"`
-	Summary     string    `gorm:"column:summary;type:text;not null;default:''"`
-	Tag         string    `gorm:"column:tag;type:text;not null;default:'other'"`
-	FieldsJSON  []byte    `gorm:"column:fields_json;type:jsonb;not null"`
-	CreatedAt   time.Time `gorm:"column:created_at;not null"`
+	ID          string       `gorm:"column:id;type:text;primaryKey"`
+	UserID      string       `gorm:"column:user_id;type:text;not null"`
+	CapturedAt  time.Time    `gorm:"column:captured_at;not null"`
+	SourceApp   string       `gorm:"column:source_app;type:text;not null;default:''"`
+	SourceTitle string       `gorm:"column:source_title;type:text;not null;default:''"`
+	OCRText     string       `gorm:"column:ocr_text;type:text;not null;default:''"`
+	Summary     string       `gorm:"column:summary;type:text;not null;default:''"`
+	Tag         string       `gorm:"column:tag;type:text;not null;default:'other'"`
+	FieldsJSON  jsonbPayload `gorm:"column:fields_json;type:jsonb;not null"`
+	CreatedAt   time.Time    `gorm:"column:created_at;not null"`
 }
 
 func (captureRow) TableName() string {
@@ -201,7 +244,7 @@ func (s *PostgresStore) SaveCapture(record model.CaptureRecord) error {
 		OCRText:     record.OCRText,
 		Summary:     record.Summary,
 		Tag:         record.Tag,
-		FieldsJSON:  fieldsJSON,
+		FieldsJSON:  jsonbPayload(fieldsJSON),
 		CreatedAt:   time.Now().UTC(),
 	}
 
@@ -209,6 +252,14 @@ func (s *PostgresStore) SaveCapture(record model.CaptureRecord) error {
 }
 
 func (s *PostgresStore) ListCaptures(userID string, limit int) []model.CaptureRecord {
+	return s.listCaptures(userID, limit, captureSelectColumns)
+}
+
+func (s *PostgresStore) ListRecentCaptures(userID string, limit int) []model.CaptureRecord {
+	return s.listCaptures(userID, limit, recentCaptureSelectColumns)
+}
+
+func (s *PostgresStore) listCaptures(userID string, limit int, selectColumns string) []model.CaptureRecord {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultStoreTimeout)
 	defer cancel()
 
@@ -218,6 +269,7 @@ func (s *PostgresStore) ListCaptures(userID string, limit int) []model.CaptureRe
 
 	var rows []captureRow
 	if err := s.db.WithContext(ctx).
+		Select(selectColumns).
 		Where("user_id = ?", strings.TrimSpace(userID)).
 		Order("captured_at DESC").
 		Limit(limit).
@@ -238,6 +290,7 @@ func (s *PostgresStore) GetCapture(id string) (model.CaptureRecord, bool) {
 
 	var row captureRow
 	err := s.db.WithContext(ctx).
+		Select(captureSelectColumns).
 		Where("id = ?", strings.TrimSpace(id)).
 		Take(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -307,6 +360,7 @@ func (s *PostgresStore) GetTelegramLink(eventID string) (model.TelegramLinkStatu
 
 	var row telegramLinkRow
 	err := s.db.WithContext(ctx).
+		Select("event_id,user_id,status,chat_id,created_at,linked_at").
 		Where("event_id = ?", strings.TrimSpace(eventID)).
 		Take(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -458,6 +512,7 @@ func (s *PostgresStore) GetUserByEmail(email string) (model.UserAuth, bool) {
 
 	var row userRow
 	err := s.db.WithContext(ctx).
+		Select(userSelectColumns).
 		Where("email = ?", strings.ToLower(strings.TrimSpace(email))).
 		Take(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -481,6 +536,7 @@ func (s *PostgresStore) GetUserByID(userID string) (model.UserAuth, bool) {
 
 	var row userRow
 	err := s.db.WithContext(ctx).
+		Select(userSelectColumns).
 		Where("id = ?", strings.TrimSpace(userID)).
 		Take(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -510,7 +566,7 @@ func captureRowToModel(row captureRow) model.CaptureRecord {
 		OCRText: row.OCRText,
 		Summary: row.Summary,
 		Tag:     row.Tag,
-		Fields:  unmarshalFields(row.FieldsJSON),
+		Fields:  unmarshalFields([]byte(row.FieldsJSON)),
 	}
 }
 

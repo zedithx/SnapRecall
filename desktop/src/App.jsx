@@ -514,6 +514,7 @@ function App() {
   const [isUpdatingShortcut, setIsUpdatingShortcut] = useState(false)
   const [isStartingTelegramLink, setIsStartingTelegramLink] = useState(false)
   const [isCheckingTelegramLink, setIsCheckingTelegramLink] = useState(false)
+  const [isDisconnectingTelegram, setIsDisconnectingTelegram] = useState(false)
 
   const [shortcut, setShortcut] = useState('CommandOrControl+Shift+S')
   const [shortcutDraft, setShortcutDraft] = useState('CommandOrControl+Shift+S')
@@ -528,7 +529,7 @@ function App() {
   const [searchTerm, setSearchTerm] = useState('')
   const [selectedCaptureID, setSelectedCaptureID] = useState('')
   const [selectedCaptureIDs, setSelectedCaptureIDs] = useState([])
-  const selectAllCheckboxRef = useRef(null)
+  const captureSelectionAnchorRef = useRef('')
   const [regionCaptureImage, setRegionCaptureImage] = useState('')
   const [regionSelection, setRegionSelection] = useState(null)
   const [selectionDragStart, setSelectionDragStart] = useState(null)
@@ -612,8 +613,10 @@ function App() {
       return count
     }, 0)
   }, [filteredCaptures, selectedCaptureIDsSet])
-  const allVisibleCapturesSelected = Boolean(filteredCaptures.length) && selectedVisibleCaptureCount === filteredCaptures.length
+  const allVisibleCapturesSelected =
+    Boolean(filteredCaptures.length) && selectedVisibleCaptureCount === filteredCaptures.length
   const hasPartialVisibleCaptureSelection = selectedVisibleCaptureCount > 0 && !allVisibleCapturesSelected
+  const selectedHiddenCaptureCount = Math.max(0, selectedCaptureIDs.length - selectedVisibleCaptureCount)
   const deleteTargetCaptureIDs = useMemo(() => {
     if (selectedCaptureIDs.length) {
       return selectedCaptureIDs
@@ -735,6 +738,9 @@ function App() {
     if (isCheckingTelegramLink) {
       return 'Checking Telegram link status...'
     }
+    if (isDisconnectingTelegram) {
+      return 'Disconnecting Telegram integration...'
+    }
     if (isDeletingCapture) {
       return 'Deleting selected capture...'
     }
@@ -749,6 +755,7 @@ function App() {
     isAuthenticating,
     isCheckingAuth,
     isCheckingTelegramLink,
+    isDisconnectingTelegram,
     isDeletingCapture,
     isSavingCapture,
     isStartingTelegramLink,
@@ -760,6 +767,7 @@ function App() {
       setRecentCaptures([])
       setSelectedCaptureID('')
       setSelectedCaptureIDs([])
+      captureSelectionAnchorRef.current = ''
       return
     }
 
@@ -786,10 +794,17 @@ function App() {
           }
           return data.captures[0].id
         })
-        setSelectedCaptureIDs((prev) => prev.filter((captureID) => validCaptureIDs.has(captureID)))
+        setSelectedCaptureIDs((prev) => {
+          const nextSelection = prev.filter((captureID) => validCaptureIDs.has(captureID))
+          if (!nextSelection.length) {
+            captureSelectionAnchorRef.current = ''
+          }
+          return nextSelection
+        })
       } else {
         setSelectedCaptureID('')
         setSelectedCaptureIDs([])
+        captureSelectionAnchorRef.current = ''
       }
     } catch {
       // Keep existing view if fetch fails.
@@ -1249,12 +1264,6 @@ function App() {
   }, [captureResult, selectedCapture])
 
   useEffect(() => {
-    if (selectAllCheckboxRef.current) {
-      selectAllCheckboxRef.current.indeterminate = hasPartialVisibleCaptureSelection
-    }
-  }, [hasPartialVisibleCaptureSelection])
-
-  useEffect(() => {
     if (displayTab === activeTab) {
       return
     }
@@ -1351,6 +1360,7 @@ function App() {
     setRecentCaptures([])
     setSelectedCaptureID('')
     setSelectedCaptureIDs([])
+    captureSelectionAnchorRef.current = ''
     setCaptureResult(null)
     setQueryResult(null)
     setRegionCaptureImage('')
@@ -1469,6 +1479,38 @@ function App() {
     }
   }
 
+  async function onDisconnectTelegram() {
+    if (!authUser) {
+      setStatus('Please log in to manage Telegram integration.')
+      return
+    }
+
+    try {
+      setIsDisconnectingTelegram(true)
+      setStatus('Disconnecting Telegram...')
+
+      const res = await fetch(`${backendURL}/v1/integrations/telegram/disconnect`, {
+        method: 'POST',
+        headers: {
+          ...authHeaders
+        }
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        setStatus(`Telegram disconnect failed: ${data.error || 'unknown error'}`)
+        return
+      }
+
+      setTelegramEventID('')
+      setTelegramLinkStatus('not_linked')
+      setStatus(data?.disconnected ? 'Telegram disconnected.' : 'Telegram was already disconnected.')
+    } catch (err) {
+      setStatus(`Telegram disconnect failed: ${formatFetchError(err, backendURL)}`)
+    } finally {
+      setIsDisconnectingTelegram(false)
+    }
+  }
+
   async function submitRecallQuestion(rawQuestion) {
     if (!authUser) {
       setStatus('Please log in to ask SnapRecall.')
@@ -1537,34 +1579,158 @@ function App() {
     }
   }
 
-  function onToggleCaptureSelection(captureID, checked) {
-    setSelectedCaptureIDs((prev) => {
-      const next = new Set(prev)
-      if (checked) {
-        next.add(captureID)
-      } else {
-        next.delete(captureID)
-      }
-      return Array.from(next)
-    })
-  }
+  const onToggleCaptureSelection = useCallback(
+    (captureID, checked, options = {}) => {
+      const shouldSelectRange = Boolean(options.shiftKey)
+      const anchorCaptureID = captureSelectionAnchorRef.current
 
-  function onToggleSelectAllVisible(checked) {
-    const visibleCaptureIDs = filteredCaptures.map((record) => record.id)
-    setSelectedCaptureIDs((prev) => {
-      const next = new Set(prev)
-      if (checked) {
-        visibleCaptureIDs.forEach((captureID) => next.add(captureID))
-      } else {
-        visibleCaptureIDs.forEach((captureID) => next.delete(captureID))
-      }
-      return Array.from(next)
-    })
-  }
+      setSelectedCaptureIDs((prev) => {
+        const next = new Set(prev)
+        const canUseRange =
+          shouldSelectRange &&
+          anchorCaptureID &&
+          anchorCaptureID !== captureID &&
+          filteredCaptures.some((record) => record.id === anchorCaptureID)
 
-  function onClearCaptureSelection() {
+        if (canUseRange) {
+          const startIndex = filteredCaptures.findIndex((record) => record.id === anchorCaptureID)
+          const endIndex = filteredCaptures.findIndex((record) => record.id === captureID)
+          if (startIndex !== -1 && endIndex !== -1) {
+            const [fromIndex, toIndex] =
+              startIndex <= endIndex ? [startIndex, endIndex] : [endIndex, startIndex]
+            filteredCaptures.slice(fromIndex, toIndex + 1).forEach((record) => {
+              if (checked) {
+                next.add(record.id)
+              } else {
+                next.delete(record.id)
+              }
+            })
+          }
+        } else if (checked) {
+          next.add(captureID)
+        } else {
+          next.delete(captureID)
+        }
+
+        const nextSelection = Array.from(next)
+        if (!nextSelection.length) {
+          captureSelectionAnchorRef.current = ''
+        } else if (!shouldSelectRange || !anchorCaptureID) {
+          captureSelectionAnchorRef.current = captureID
+        }
+        return nextSelection
+      })
+
+      setSelectedCaptureID(captureID)
+    },
+    [filteredCaptures]
+  )
+
+  const onToggleSelectAllVisible = useCallback(
+    (checked) => {
+      const visibleCaptureIDs = filteredCaptures.map((record) => record.id)
+      setSelectedCaptureIDs((prev) => {
+        const next = new Set(prev)
+        if (checked) {
+          visibleCaptureIDs.forEach((captureID) => next.add(captureID))
+        } else {
+          visibleCaptureIDs.forEach((captureID) => next.delete(captureID))
+        }
+
+        const nextSelection = Array.from(next)
+        if (!nextSelection.length) {
+          captureSelectionAnchorRef.current = ''
+        } else if (checked && visibleCaptureIDs.length) {
+          captureSelectionAnchorRef.current = visibleCaptureIDs[0]
+        }
+        return nextSelection
+      })
+    },
+    [filteredCaptures]
+  )
+
+  const onClearCaptureSelection = useCallback(() => {
+    captureSelectionAnchorRef.current = ''
     setSelectedCaptureIDs([])
-  }
+  }, [])
+
+  const onCaptureRowClick = useCallback(
+    (event, captureID) => {
+      if (event.shiftKey) {
+        event.preventDefault()
+        onToggleCaptureSelection(captureID, true, { shiftKey: true })
+        return
+      }
+
+      if (event.metaKey || event.ctrlKey) {
+        event.preventDefault()
+        const checked = selectedCaptureIDsSet.has(captureID)
+        onToggleCaptureSelection(captureID, !checked)
+        return
+      }
+
+      captureSelectionAnchorRef.current = captureID
+      setSelectedCaptureID(captureID)
+    },
+    [onToggleCaptureSelection, selectedCaptureIDsSet]
+  )
+
+  useEffect(() => {
+    if (!showWorkspace || displayTab !== TAB_KEYS.CAPTURES) {
+      return
+    }
+
+    function onCaptureSelectionKeydown(event) {
+      const target = event.target
+      const tagName = String(target?.tagName || '').toLowerCase()
+      const isInputTarget =
+        tagName === 'input' ||
+        tagName === 'textarea' ||
+        tagName === 'select' ||
+        Boolean(target?.isContentEditable)
+      if (isInputTarget) {
+        return
+      }
+
+      const pressedKey = String(event.key || '').toLowerCase()
+
+      if ((event.metaKey || event.ctrlKey) && pressedKey === 'a') {
+        if (!filteredCaptures.length) {
+          return
+        }
+
+        event.preventDefault()
+        const shouldSelectVisible = !allVisibleCapturesSelected || hasPartialVisibleCaptureSelection
+        onToggleSelectAllVisible(shouldSelectVisible)
+        if (shouldSelectVisible) {
+          setStatus(`Selected ${filteredCaptures.length} visible captures.`)
+        } else {
+          setStatus('Cleared visible capture selection.')
+        }
+        return
+      }
+
+      if (pressedKey === 'escape' && selectedCaptureIDs.length) {
+        event.preventDefault()
+        onClearCaptureSelection()
+        setStatus('Capture selection cleared.')
+      }
+    }
+
+    window.addEventListener('keydown', onCaptureSelectionKeydown)
+    return () => {
+      window.removeEventListener('keydown', onCaptureSelectionKeydown)
+    }
+  }, [
+    allVisibleCapturesSelected,
+    displayTab,
+    filteredCaptures.length,
+    hasPartialVisibleCaptureSelection,
+    onClearCaptureSelection,
+    onToggleSelectAllVisible,
+    selectedCaptureIDs.length,
+    showWorkspace
+  ])
 
   async function onDeleteSelectedCapture() {
     const targetCaptureIDs = deleteTargetCaptureIDs
@@ -1620,7 +1786,13 @@ function App() {
       const deletedCaptureIDsSet = new Set(deletedCaptureIDs)
 
       setRecentCaptures((prev) => prev.filter((record) => !deletedCaptureIDsSet.has(record.id)))
-      setSelectedCaptureIDs((prev) => prev.filter((captureID) => !deletedCaptureIDsSet.has(captureID)))
+      setSelectedCaptureIDs((prev) => {
+        const nextSelection = prev.filter((captureID) => !deletedCaptureIDsSet.has(captureID))
+        if (!nextSelection.length) {
+          captureSelectionAnchorRef.current = ''
+        }
+        return nextSelection
+      })
       setSelectedCaptureID((prev) => (deletedCaptureIDsSet.has(prev) ? '' : prev))
 
       if (captureResult?.capture_id && deletedCaptureIDsSet.has(captureResult.capture_id)) {
@@ -1810,19 +1982,26 @@ function App() {
       const tag = extractTag(record)
       const active = selectedCapture?.id === record.id
       const checked = selectedCaptureIDsSet.has(record.id)
+      const title = extractTitle(record)
       return (
-        <div key={record.id} className={`history-row-shell ${checked ? 'checked' : ''}`}>
-          <label className="history-row-checkbox" aria-label={`Select ${extractTitle(record)}`}>
+        <div key={record.id} className={`history-row-shell ${checked ? 'checked' : ''} ${active ? 'active' : ''}`}>
+          <label className="history-row-checkbox" aria-label={`Select ${title}`}>
             <input
               type="checkbox"
               checked={checked}
-              onChange={(event) => onToggleCaptureSelection(record.id, event.target.checked)}
+              onChange={(event) =>
+                onToggleCaptureSelection(record.id, event.target.checked, {
+                  shiftKey: Boolean(event.nativeEvent?.shiftKey || event.shiftKey)
+                })
+              }
             />
           </label>
           <button
             type="button"
             className={`history-row ${active ? 'active' : ''}`}
-            onClick={() => setSelectedCaptureID(record.id)}
+            onClick={(event) => onCaptureRowClick(event, record.id)}
+            aria-current={active ? 'true' : undefined}
+            aria-pressed={checked}
             style={{ '--row-delay': `${index * 40}ms` }}
           >
             <div className="history-icon-wrap">
@@ -1830,7 +2009,7 @@ function App() {
             </div>
             <div className="history-content">
               <div className="history-top">
-                <h3>{extractTitle(record)}</h3>
+                <h3>{title}</h3>
                 <span className="tag-pill">{tag}</span>
               </div>
               <p>
@@ -2115,7 +2294,7 @@ function App() {
             type="button"
             className="primary-gradient telegram-integration-cta"
             onClick={onStartTelegramLink}
-            disabled={isStartingTelegramLink || isCheckingTelegramLink}
+            disabled={isStartingTelegramLink || isCheckingTelegramLink || isDisconnectingTelegram}
           >
             <span>{isStartingTelegramLink ? 'Generating Event ID...' : 'Connect Telegram'}</span>
             <img src={ICONS.arrowRight} alt="" />
@@ -2176,7 +2355,9 @@ function App() {
                 ? 'Deleting...'
                 : deleteTargetCaptureIDs.length > 1
                   ? `Delete selected (${deleteTargetCaptureIDs.length})`
-                  : 'Delete selected'}
+                  : selectedCaptureIDs.length === 1
+                    ? 'Delete selected'
+                    : 'Delete focused'}
             </button>
           </div>
         </div>
@@ -2191,7 +2372,7 @@ function App() {
             <small>global shortcut</small>
           </div>
           <small>
-            {selectedCapture ? `Focused: ${selectedCapture.id}` : 'No capture selected'}
+            {selectedCapture ? `Focused: ${extractTitle(selectedCapture)}` : 'No capture selected'}
             {selectedCaptureIDs.length ? ` · ${selectedCaptureIDs.length} selected` : ''}
           </small>
         </div>
@@ -2207,22 +2388,40 @@ function App() {
                   placeholder="Search title, tag, source, summary..."
                 />
               </label>
-              <label className="select-all-checkbox">
-                <input
-                  ref={selectAllCheckboxRef}
-                  type="checkbox"
-                  checked={allVisibleCapturesSelected}
-                  onChange={(event) => onToggleSelectAllVisible(event.target.checked)}
-                  disabled={!filteredCaptures.length}
-                />
-                <span>Select all</span>
-              </label>
-              {selectedCaptureIDs.length ? (
-                <button type="button" className="selection-clear" onClick={onClearCaptureSelection}>
-                  Clear ({selectedCaptureIDs.length})
-                </button>
-              ) : null}
+              <span className="search-results-count">{filteredCaptures.length} shown</span>
             </div>
+            <div className="capture-selection-toolbar" role="status" aria-live="polite">
+              <div className="capture-selection-copy">
+                <strong>{selectedCaptureIDs.length ? `${selectedCaptureIDs.length} selected` : 'No captures selected'}</strong>
+                <small>
+                  {filteredCaptures.length
+                    ? `${selectedVisibleCaptureCount}/${filteredCaptures.length} in this view`
+                    : 'No captures in this view'}
+                  {selectedHiddenCaptureCount ? ` · ${selectedHiddenCaptureCount} outside current filter` : ''}
+                </small>
+              </div>
+              <div className="capture-selection-actions">
+                <button
+                  type="button"
+                  className={`selection-action ${allVisibleCapturesSelected ? 'active' : ''}`}
+                  onClick={() => onToggleSelectAllVisible(!allVisibleCapturesSelected)}
+                  disabled={!filteredCaptures.length}
+                >
+                  {allVisibleCapturesSelected ? 'Unselect visible' : 'Select visible'}
+                </button>
+                <button
+                  type="button"
+                  className="selection-action"
+                  onClick={onClearCaptureSelection}
+                  disabled={!selectedCaptureIDs.length}
+                >
+                  Clear all
+                </button>
+              </div>
+            </div>
+            <p className="capture-selection-tip">
+              Tip: Shift-click for range select. Cmd/Ctrl-click to toggle individual rows.
+            </p>
             <div className="history-list">{renderCaptureRows()}</div>
           </section>
 
@@ -2405,7 +2604,7 @@ function App() {
                     type="button"
                     className="settings-outline-btn settings-connect-btn"
                     onClick={onStartTelegramLink}
-                    disabled={isStartingTelegramLink || isCheckingTelegramLink}
+                    disabled={isStartingTelegramLink || isCheckingTelegramLink || isDisconnectingTelegram}
                   >
                     {isStartingTelegramLink ? 'Generating...' : 'Connect'}
                   </button>
@@ -2457,11 +2656,11 @@ function App() {
                 <button
                   type="button"
                   className="settings-danger-link"
-                  disabled={!telegramConnected}
-                  onClick={() => setStatus('Disconnect Telegram is not available yet.')}
+                  disabled={!telegramConnected || isDisconnectingTelegram}
+                  onClick={onDisconnectTelegram}
                 >
                   <img src={ICONS.settingsDisconnect} alt="" />
-                  <span>Disconnect Telegram</span>
+                  <span>{isDisconnectingTelegram ? 'Disconnecting...' : 'Disconnect Telegram'}</span>
                 </button>
               </div>
             </section>

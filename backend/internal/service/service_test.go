@@ -24,6 +24,36 @@ func (s stubAnalyzer) AnswerQuestion(context.Context, string, []model.CaptureRec
 	return model.QueryAnswer{}, nil
 }
 
+type sourceAnswerAnalyzer struct{}
+
+func (sourceAnswerAnalyzer) AnalyzeCapture(context.Context, string, string, string) (ai.CaptureAnalysis, error) {
+	return ai.CaptureAnalysis{}, nil
+}
+
+func (sourceAnswerAnalyzer) AnswerQuestion(_ context.Context, _ string, captures []model.CaptureRecord) (model.QueryAnswer, error) {
+	if len(captures) == 0 {
+		return model.QueryAnswer{
+			Answer:     "I cannot verify this from your saved captures.",
+			Confidence: 0.1,
+		}, nil
+	}
+	return model.QueryAnswer{
+		Answer:          "Found in your captures.",
+		SourceCaptureID: captures[0].ID,
+		Confidence:      0.92,
+	}, nil
+}
+
+type countingGetCaptureStore struct {
+	*store.MemoryStore
+	getCaptureCalls int
+}
+
+func (s *countingGetCaptureStore) GetCapture(id string) (model.CaptureRecord, bool) {
+	s.getCaptureCalls++
+	return s.MemoryStore.GetCapture(id)
+}
+
 type countingNotifier struct {
 	mu    sync.Mutex
 	calls int
@@ -161,6 +191,74 @@ func TestDeleteCapture_RemovesOwnedRecord(t *testing.T) {
 	}
 }
 
+func TestListRecentCaptures_OmitsOCRText(t *testing.T) {
+	svc := New(
+		stubAnalyzer{
+			analysis: ai.CaptureAnalysis{
+				Summary: "Exam at 9:00 AM",
+				Tag:     "exam",
+				Fields:  []model.Field{{Type: "time", Value: "9:00 AM", Confidence: 0.9}},
+				OCRText: "raw OCR payload",
+			},
+		},
+		store.NewMemoryStore(),
+		&countingNotifier{},
+		"",
+	)
+
+	if _, _, err := svc.ProcessCapture(context.Background(), model.CaptureInput{
+		UserID:  "u_recent",
+		OCRText: "raw OCR payload",
+	}); err != nil {
+		t.Fatalf("ProcessCapture returned error: %v", err)
+	}
+
+	records, err := svc.ListRecentCaptures("u_recent", 10)
+	if err != nil {
+		t.Fatalf("ListRecentCaptures returned error: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected one capture, got %d", len(records))
+	}
+	if records[0].OCRText != "" {
+		t.Fatalf("expected OCRText to be omitted from recent captures, got %q", records[0].OCRText)
+	}
+}
+
+func TestAnswerQuestion_DoesNotLookupCaptureWhenSourceIsInLoadedBatch(t *testing.T) {
+	mem := &countingGetCaptureStore{MemoryStore: store.NewMemoryStore()}
+	record := model.CaptureRecord{
+		ID:         "cap_1",
+		UserID:     "u_query",
+		CapturedAt: time.Date(2026, time.January, 2, 9, 30, 0, 0, time.UTC),
+		Source: model.SourceMeta{
+			App:   "desktop",
+			Title: "Exam note",
+		},
+		OCRText: "Exam on Jan 2",
+		Summary: "Exam on Jan 2 at 9:30",
+		Tag:     "exam",
+	}
+	if err := mem.SaveCapture(record); err != nil {
+		t.Fatalf("SaveCapture returned error: %v", err)
+	}
+
+	svc := New(sourceAnswerAnalyzer{}, mem, &countingNotifier{}, "")
+	answer, err := svc.AnswerQuestion(context.Background(), model.QueryInput{
+		UserID:   "u_query",
+		Question: "When is my exam?",
+	})
+	if err != nil {
+		t.Fatalf("AnswerQuestion returned error: %v", err)
+	}
+	if !strings.Contains(answer.Answer, "(from capture on ") {
+		t.Fatalf("expected answer to include capture timestamp, got %q", answer.Answer)
+	}
+	if mem.getCaptureCalls != 0 {
+		t.Fatalf("expected no GetCapture call, got %d", mem.getCaptureCalls)
+	}
+}
+
 func TestRegisterAuthenticateAndLoadUserProfile(t *testing.T) {
 	svc := New(
 		stubAnalyzer{},
@@ -290,6 +388,65 @@ func TestTelegramLinkAndCaptureUseLinkedChat(t *testing.T) {
 	linkedAt := claimed.LinkedAt
 	if linkedAt == nil || linkedAt.IsZero() || linkedAt.After(time.Now().UTC().Add(2*time.Second)) {
 		t.Fatalf("expected reasonable linked_at timestamp, got %v", linkedAt)
+	}
+}
+
+func TestDisconnectTelegramIntegration_RemovesLinkedChat(t *testing.T) {
+	mem := store.NewMemoryStore()
+	svc := New(
+		stubAnalyzer{},
+		mem,
+		&countingNotifier{},
+		"",
+	)
+
+	userID := "usr_disconnect"
+	link, err := svc.StartTelegramLink(userID)
+	if err != nil {
+		t.Fatalf("StartTelegramLink returned error: %v", err)
+	}
+	if _, ok := svc.TryCompleteTelegramLink(link.EventID, "chat_456"); !ok {
+		t.Fatalf("expected TryCompleteTelegramLink to succeed")
+	}
+
+	initialStatus, err := svc.GetTelegramIntegrationStatus(userID)
+	if err != nil {
+		t.Fatalf("GetTelegramIntegrationStatus returned error: %v", err)
+	}
+	if initialStatus.Status != "linked" {
+		t.Fatalf("expected linked status, got %+v", initialStatus)
+	}
+
+	disconnected, err := svc.DisconnectTelegramIntegration(userID)
+	if err != nil {
+		t.Fatalf("DisconnectTelegramIntegration returned error: %v", err)
+	}
+	if !disconnected {
+		t.Fatalf("expected disconnection to report true")
+	}
+
+	status, err := svc.GetTelegramIntegrationStatus(userID)
+	if err != nil {
+		t.Fatalf("GetTelegramIntegrationStatus after disconnect returned error: %v", err)
+	}
+	if status.Status != "not_linked" || status.ChatID != "" {
+		t.Fatalf("expected not_linked with empty chat id, got %+v", status)
+	}
+
+	disconnected, err = svc.DisconnectTelegramIntegration(userID)
+	if err != nil {
+		t.Fatalf("second DisconnectTelegramIntegration returned error: %v", err)
+	}
+	if disconnected {
+		t.Fatalf("expected second disconnect to report false")
+	}
+
+	relink, err := svc.StartTelegramLink(userID)
+	if err != nil {
+		t.Fatalf("StartTelegramLink after disconnect returned error: %v", err)
+	}
+	if relink.Status != "pending" || relink.EventID == "" {
+		t.Fatalf("expected pending link after disconnect, got %+v", relink)
 	}
 }
 

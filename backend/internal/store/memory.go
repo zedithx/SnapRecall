@@ -61,6 +61,20 @@ func (s *MemoryStore) ListCaptures(userID string, limit int) []model.CaptureReco
 	return result
 }
 
+func (s *MemoryStore) ListRecentCaptures(userID string, limit int) []model.CaptureRecord {
+	records := s.ListCaptures(userID, limit)
+	if len(records) == 0 {
+		return nil
+	}
+
+	out := make([]model.CaptureRecord, len(records))
+	copy(out, records)
+	for i := range out {
+		out[i].OCRText = ""
+	}
+	return out
+}
+
 func (s *MemoryStore) GetCapture(id string) (model.CaptureRecord, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

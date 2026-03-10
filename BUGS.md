@@ -124,3 +124,14 @@ Use this file to record each bug in a consistent format.
 - **Status:** Resolved
 - **Owner:** Codex
 - **Notes:** Batch delete currently sends sequential delete requests to `/v1/captures/:id`.
+
+## Bug 011
+- **Date:** 2026-03-11
+- **Bug/Error:** `Disconnect Telegram` button in Settings only showed a placeholder status message instead of running a disconnect action.
+- **Impact:** Users could not unlink Telegram from their account, so mobile notifications and chat linkage could not be revoked from the UI.
+- **Reproduction Steps:** Open desktop app Settings -> Telegram Integration -> click `Disconnect Telegram` while connected.
+- **Root Cause:** Frontend button callback was hardcoded to `setStatus('Disconnect Telegram is not available yet.')`, so no API call was made.
+- **Resolution Method:** Wired the button to call `POST /v1/integrations/telegram/disconnect`, added disconnect loading/status handling in the desktop app, and added a service regression test that verifies unlink and relink flow.
+- **Status:** Resolved
+- **Owner:** Codex
+- **Notes:** Disconnect removes user chat linkage; users can immediately generate a fresh event ID to relink.

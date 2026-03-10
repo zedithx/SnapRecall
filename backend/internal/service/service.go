@@ -27,6 +27,7 @@ type Analyzer interface {
 type CaptureStore interface {
 	SaveCapture(record model.CaptureRecord) error
 	ListCaptures(userID string, limit int) []model.CaptureRecord
+	ListRecentCaptures(userID string, limit int) []model.CaptureRecord
 	GetCapture(id string) (model.CaptureRecord, bool)
 	DeleteCapture(userID, captureID string) (bool, error)
 	CreateTelegramLink(link model.TelegramLinkStatus) error
@@ -210,6 +211,11 @@ func (s *Service) AnswerQuestion(ctx context.Context, in model.QueryInput) (mode
 		}, nil
 	}
 
+	recordCapturedAtByID := make(map[string]time.Time, len(records))
+	for _, record := range records {
+		recordCapturedAtByID[record.ID] = record.CapturedAt
+	}
+
 	answer, err := s.analyzer.AnswerQuestion(ctx, in.Question, records)
 	if err != nil {
 		fallback := records[0]
@@ -221,7 +227,9 @@ func (s *Service) AnswerQuestion(ctx context.Context, in model.QueryInput) (mode
 	}
 
 	if answer.SourceCaptureID != "" {
-		if source, ok := s.store.GetCapture(answer.SourceCaptureID); ok {
+		if capturedAt, ok := recordCapturedAtByID[answer.SourceCaptureID]; ok {
+			answer.Answer = fmt.Sprintf("%s (from capture on %s)", answer.Answer, capturedAt.Format("2006-01-02 15:04 MST"))
+		} else if source, ok := s.store.GetCapture(answer.SourceCaptureID); ok {
 			answer.Answer = fmt.Sprintf("%s (from capture on %s)", answer.Answer, source.CapturedAt.Format("2006-01-02 15:04 MST"))
 		}
 	}
@@ -242,7 +250,7 @@ func (s *Service) ListRecentCaptures(userID string, limit int) ([]model.CaptureR
 		limit = 100
 	}
 
-	records := s.store.ListCaptures(userID, limit)
+	records := s.store.ListRecentCaptures(userID, limit)
 	return records, nil
 }
 
