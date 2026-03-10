@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"importanttracker/backend/internal/ai"
@@ -25,8 +26,18 @@ func main() {
 
 	captureStore := store.NewMemoryStore()
 	aiClient := ai.NewOpenAIClient(cfg.OpenAIAPIKey, cfg.OpenAIModel, cfg.OpenAIBaseURL, cfg.RequestTimeout)
-	tgClient := telegram.NewClient(cfg.TelegramBotToken, cfg.RequestTimeout)
+	tgClient := telegram.NewClient(cfg.TelegramBotToken, cfg.TelegramAPIBaseURL, cfg.RequestTimeout)
 	svc := service.New(aiClient, captureStore, tgClient, cfg.TelegramDefaultChatID)
+
+	botUsername := ""
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.RequestTimeout)
+	botUsername, err = tgClient.GetBotUsername(ctx)
+	cancel()
+	if err != nil {
+		log.Printf("telegram getMe failed: %v", err)
+	}
+
+	startTelegramLinkWatcher(tgClient, svc)
 
 	mux := http.NewServeMux()
 
@@ -93,10 +104,53 @@ func main() {
 		writeJSON(w, http.StatusOK, answer)
 	})
 
+	mux.HandleFunc("/v1/integrations/telegram/start", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+
+		var in model.TelegramLinkStartInput
+		if err := decodeJSON(r, &in); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+
+		link, err := svc.StartTelegramLink(in.UserID)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"event_id":     link.EventID,
+			"user_id":      link.UserID,
+			"status":       link.Status,
+			"created_at":   link.CreatedAt,
+			"bot_username": botUsername,
+		})
+	})
+
+	mux.HandleFunc("/v1/integrations/telegram/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+
+		eventID := r.URL.Query().Get("event_id")
+		link, err := svc.GetTelegramLinkStatus(eventID)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, link)
+	})
+
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	server := &http.Server{
 		Addr:         addr,
-		Handler:      mux,
+		Handler:      withCORS(mux),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -106,6 +160,56 @@ func main() {
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("server failed: %v", err)
 	}
+}
+
+func startTelegramLinkWatcher(tgClient *telegram.Client, svc *service.Service) {
+	go func() {
+		var offset int64 = 0
+
+		for {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			updates, nextOffset, err := tgClient.GetUpdates(ctx, offset, 10)
+			cancel()
+			if err != nil {
+				log.Printf("telegram update poll failed: %v", err)
+				time.Sleep(3 * time.Second)
+				continue
+			}
+
+			offset = nextOffset
+
+			for _, update := range updates {
+				if update.Message == nil {
+					continue
+				}
+
+				text := strings.TrimSpace(update.Message.Text)
+				if text == "" {
+					continue
+				}
+
+				chatID := telegram.ChatIDToString(update.Message.Chat.ID)
+				link, linked := svc.TryCompleteTelegramLink(text, chatID)
+				if linked {
+					reply := fmt.Sprintf(
+						"SnapRecall connected successfully for event %s. You can return to the desktop app.",
+						link.EventID,
+					)
+					_ = tgClient.SendTextMessage(context.Background(), chatID, reply)
+					continue
+				}
+
+				answerCtx, answerCancel := context.WithTimeout(context.Background(), 20*time.Second)
+				reply, handled := svc.HandleTelegramQuestion(answerCtx, chatID, text)
+				answerCancel()
+				if !handled {
+					continue
+				}
+
+				_ = tgClient.SendTextMessage(context.Background(), chatID, reply)
+			}
+		}
+	}()
 }
 
 func decodeJSON(r *http.Request, out any) error {
@@ -119,4 +223,19 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }

@@ -4,6 +4,7 @@ Minimal MVP backend for:
 - Capture processing (`/v1/captures`)
 - Q&A retrieval (`/v1/query`)
 - Telegram push notifications
+- Telegram event-ID linking (`/v1/integrations/telegram/*`)
 
 ## 1) Setup
 ```bash
@@ -13,16 +14,33 @@ cp .env.example .env
 Fill in:
 - `OPENAI_API_KEY`
 - `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_DEFAULT_CHAT_ID` (optional but recommended)
+- `TELEGRAM_API_BASE_URL` (optional, defaults to Telegram official API)
+- `TELEGRAM_DEFAULT_CHAT_ID` (optional fallback)
+- `POSTGRES_DSN` or `DATABASE_URL` (optional now, for Postgres store)
+
+Supabase DSN format example:
+`postgresql://postgres.<project-ref>:<password>@aws-1-ap-south-1.pooler.supabase.com:5432/postgres?sslmode=require`
 
 ## 2) Run
 ```bash
 cd backend
-set -a; source ../.env; set +a
 go run ./cmd/server
 ```
 
-## 3) API quick test
+The backend auto-loads `.env` (tries `backend/.env` then `../.env`).
+
+## 3) Telegram link flow
+1. Desktop calls `POST /v1/integrations/telegram/start` with `user_id`.
+2. Backend returns `event_id` (example: `EVT-12AB34`).
+3. User starts Telegram bot and sends that `event_id` message.
+4. Backend polling worker claims link and maps `user_id` -> `chat_id`.
+5. Desktop polls `GET /v1/integrations/telegram/status?event_id=...` until status is `linked`.
+
+After linking, Telegram chat supports:
+- send plain text question directly
+- or send `/ask <question>`
+
+## 4) API quick test
 Create capture:
 ```bash
 curl -X POST http://localhost:8080/v1/captures \
@@ -36,17 +54,16 @@ curl -X POST http://localhost:8080/v1/captures \
   }'
 ```
 
-Create capture from screenshot payload:
+Start Telegram link:
 ```bash
-curl -X POST http://localhost:8080/v1/captures \
+curl -X POST http://localhost:8080/v1/integrations/telegram/start \
   -H 'Content-Type: application/json' \
-  -d '{
-    "user_id":"u_1",
-    "image_base64":"<base64_without_data_url_prefix>",
-    "tag_hint":"exam",
-    "source_app":"desktop",
-    "source_title":"Quick Capture"
-  }'
+  -d '{"user_id":"u_1"}'
+```
+
+Check Telegram link status:
+```bash
+curl "http://localhost:8080/v1/integrations/telegram/status?event_id=EVT-12AB34"
 ```
 
 Ask question:

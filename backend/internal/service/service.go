@@ -5,12 +5,15 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
 	"importanttracker/backend/internal/ai"
 	"importanttracker/backend/internal/model"
 )
+
+var telegramEventPattern = regexp.MustCompile(`EVT-[A-Z0-9]{6}`)
 
 type Analyzer interface {
 	AnalyzeCapture(ctx context.Context, ocrText, imageBase64, tagHint string) (ai.CaptureAnalysis, error)
@@ -21,6 +24,11 @@ type CaptureStore interface {
 	SaveCapture(record model.CaptureRecord)
 	ListCaptures(userID string, limit int) []model.CaptureRecord
 	GetCapture(id string) (model.CaptureRecord, bool)
+	CreateTelegramLink(link model.TelegramLinkStatus) error
+	GetTelegramLink(eventID string) (model.TelegramLinkStatus, bool)
+	ClaimTelegramLink(eventID, chatID string, linkedAt time.Time) (model.TelegramLinkStatus, bool)
+	GetTelegramChatIDByUser(userID string) (string, bool)
+	GetUserIDByTelegramChatID(chatID string) (string, bool)
 }
 
 type TelegramNotifier interface {
@@ -77,7 +85,12 @@ func (s *Service) ProcessCapture(ctx context.Context, in model.CaptureInput) (mo
 
 	s.store.SaveCapture(record)
 
-	chatID := in.ChatID
+	chatID := strings.TrimSpace(in.ChatID)
+	if chatID == "" {
+		if linkedChat, ok := s.store.GetTelegramChatIDByUser(in.UserID); ok {
+			chatID = linkedChat
+		}
+	}
 	if chatID == "" {
 		chatID = s.defaultChatID
 	}
@@ -125,10 +138,122 @@ func (s *Service) AnswerQuestion(ctx context.Context, in model.QueryInput) (mode
 	return answer, nil
 }
 
+func (s *Service) StartTelegramLink(userID string) (model.TelegramLinkStatus, error) {
+	if strings.TrimSpace(userID) == "" {
+		return model.TelegramLinkStatus{}, fmt.Errorf("user_id is required")
+	}
+
+	for attempt := 0; attempt < 5; attempt++ {
+		eventID := generateTelegramEventID()
+		link := model.TelegramLinkStatus{
+			EventID:   eventID,
+			UserID:    strings.TrimSpace(userID),
+			Status:    "pending",
+			CreatedAt: time.Now().UTC(),
+		}
+
+		if err := s.store.CreateTelegramLink(link); err == nil {
+			return link, nil
+		}
+	}
+
+	return model.TelegramLinkStatus{}, fmt.Errorf("failed to create telegram link event")
+}
+
+func (s *Service) GetTelegramLinkStatus(eventID string) (model.TelegramLinkStatus, error) {
+	normalized := normalizeTelegramEventID(eventID)
+	if normalized == "" {
+		return model.TelegramLinkStatus{}, fmt.Errorf("event_id is required")
+	}
+
+	link, ok := s.store.GetTelegramLink(normalized)
+	if !ok {
+		return model.TelegramLinkStatus{}, fmt.Errorf("event_id not found")
+	}
+	return link, nil
+}
+
+func (s *Service) TryCompleteTelegramLink(text, chatID string) (model.TelegramLinkStatus, bool) {
+	eventID := extractTelegramEventID(text)
+	if eventID == "" || strings.TrimSpace(chatID) == "" {
+		return model.TelegramLinkStatus{}, false
+	}
+
+	link, ok := s.store.ClaimTelegramLink(eventID, strings.TrimSpace(chatID), time.Now().UTC())
+	if !ok {
+		return model.TelegramLinkStatus{}, false
+	}
+
+	return link, true
+}
+
+func (s *Service) HandleTelegramQuestion(ctx context.Context, chatID, text string) (string, bool) {
+	chatID = strings.TrimSpace(chatID)
+	text = strings.TrimSpace(text)
+	if chatID == "" || text == "" {
+		return "", false
+	}
+
+	if text == "/start" {
+		return "Send your question directly after linking, or use /ask <question>.", true
+	}
+
+	question := text
+	if strings.HasPrefix(strings.ToLower(text), "/ask") {
+		question = strings.TrimSpace(text[len("/ask"):])
+		if question == "" {
+			return "Usage: /ask <your question>", true
+		}
+	} else if strings.HasPrefix(text, "/") {
+		return "Unknown command. Use /ask <question> or send your question directly.", true
+	}
+
+	userID, linked := s.store.GetUserIDByTelegramChatID(chatID)
+	if !linked {
+		return "This chat is not linked yet. In desktop app, click Integrate with Telegram and send the generated event ID here.", true
+	}
+
+	answer, err := s.AnswerQuestion(ctx, model.QueryInput{
+		UserID:   userID,
+		Question: question,
+	})
+	if err != nil {
+		return "I could not answer right now. Please try again.", true
+	}
+
+	return answer.Answer, true
+}
+
+func extractTelegramEventID(text string) string {
+	upper := strings.ToUpper(strings.TrimSpace(text))
+	if upper == "" {
+		return ""
+	}
+
+	match := telegramEventPattern.FindString(upper)
+	if match == "" {
+		return ""
+	}
+
+	return match
+}
+
+func normalizeTelegramEventID(raw string) string {
+	return extractTelegramEventID(raw)
+}
+
 func generateCaptureID() string {
 	buf := make([]byte, 8)
 	if _, err := rand.Read(buf); err != nil {
 		return fmt.Sprintf("cap_%d", time.Now().UnixNano())
 	}
 	return "cap_" + hex.EncodeToString(buf)
+}
+
+func generateTelegramEventID() string {
+	buf := make([]byte, 3)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("EVT-%06d", time.Now().UnixNano()%1000000)
+	}
+	return "EVT-" + strings.ToUpper(hex.EncodeToString(buf))
 }

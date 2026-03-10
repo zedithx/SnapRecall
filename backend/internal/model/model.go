@@ -44,3 +44,16 @@ type QueryAnswer struct {
 	SourceCaptureID string  `json:"source_capture_id"`
 	Confidence      float64 `json:"confidence"`
 }
+
+type TelegramLinkStartInput struct {
+	UserID string `json:"user_id"`
+}
+
+type TelegramLinkStatus struct {
+	EventID   string     `json:"event_id"`
+	UserID    string     `json:"user_id"`
+	Status    string     `json:"status"`
+	ChatID    string     `json:"chat_id,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	LinkedAt  *time.Time `json:"linked_at,omitempty"`
+}
