@@ -1,11 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 const DEFAULT_BACKEND_URL = normalizeBackendURL(
   import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'
 )
 const AUTH_TOKEN_KEY = 'snaprecall.auth_token'
 const AUTH_USER_KEY = 'snaprecall.auth_user'
-const SKIP_TELEGRAM_KEY = 'snaprecall.skip_telegram_setup'
 
 const TAB_KEYS = {
   DASHBOARD: 'dashboard',
@@ -13,6 +12,13 @@ const TAB_KEYS = {
   RECALL: 'recall',
   SETTINGS: 'settings'
 }
+const APP_VERSION = '1.0.0'
+const STORAGE_LIMIT_MB = 200
+const CAPTURE_SUCCESS_STATUS = 'Capture saved successfully.'
+const SCREEN_EXIT_DURATION_MS = 150
+const SCREEN_ENTER_DURATION_MS = 380
+const TAB_EXIT_DURATION_MS = 90
+const TAB_ENTER_DURATION_MS = 260
 
 const ICONS = {
   // Login
@@ -47,8 +53,42 @@ const ICONS = {
   rowTravel: 'https://www.figma.com/api/mcp/asset/51d0b242-f45a-4277-9e18-5bbe8afb5aff',
   rowHealth: 'https://www.figma.com/api/mcp/asset/62ffe332-0171-4469-896b-94dd2f7537a2',
   rowWork: 'https://www.figma.com/api/mcp/asset/cac690a7-4487-4dca-ba71-993b4798e4bc',
-  rowExpand: 'https://www.figma.com/api/mcp/asset/bc561891-b3bc-4d5f-8c03-d574387786a4'
+  rowExpand: 'https://www.figma.com/api/mcp/asset/bc561891-b3bc-4d5f-8c03-d574387786a4',
+  recallBot: 'https://www.figma.com/api/mcp/asset/731ad4a1-a21b-4e58-8cdc-f7cc7309b1de',
+  recallFocus: 'https://www.figma.com/api/mcp/asset/76f76ab8-6832-4b47-926e-7f0200f0a857',
+  recallSend: 'https://www.figma.com/api/mcp/asset/529b3fad-91aa-424a-bec0-26c26cba9f5c',
+
+  // Dashboard
+  dashboardMetricCaptures: 'https://www.figma.com/api/mcp/asset/6830e6fe-ba70-4e40-bf1f-84689d45b53c',
+  dashboardMetricFacts: 'https://www.figma.com/api/mcp/asset/37c68559-9664-4757-875a-b423cc0c7a42',
+  dashboardMetricRecall: 'https://www.figma.com/api/mcp/asset/4eaa5f1b-6ad5-40a7-b6c7-1b841aa591af',
+  dashboardMetricTrend: 'https://www.figma.com/api/mcp/asset/e9c2eda5-9758-4303-95d7-481c68e6fe94',
+  dashboardActionCapture: 'https://www.figma.com/api/mcp/asset/ab780a4e-4c98-4f90-8d61-915e08597ef7',
+  dashboardActionRecall: 'https://www.figma.com/api/mcp/asset/dbb2588e-4575-4566-9428-a80c25ce0f4f',
+  dashboardActionArrow: 'https://www.figma.com/api/mcp/asset/70196a2b-90f6-462e-a6f9-ae7df27b69eb',
+  dashboardRecentAcademic: 'https://www.figma.com/api/mcp/asset/fc5a886d-a0dd-4c4e-8259-38f54f808d02',
+  dashboardRecentTravel: 'https://www.figma.com/api/mcp/asset/9294e21a-92f0-497d-be83-ac9fdfc1789c',
+  dashboardRecentHealth: 'https://www.figma.com/api/mcp/asset/4addf838-9c01-4a5a-bb97-c7d7a5f95bab',
+
+  // Settings
+  settingsAccount: 'https://www.figma.com/api/mcp/asset/6b5a120c-d327-4d5d-a30a-356bc60aec6e',
+  settingsAccountAvatar: 'https://www.figma.com/api/mcp/asset/bb93e14c-c013-494b-899b-2174ec4e6277',
+  settingsKeyboard: 'https://www.figma.com/api/mcp/asset/e094f0d9-dc39-42ed-9fbc-3e60a9aa6d56',
+  settingsTelegram: 'https://www.figma.com/api/mcp/asset/f49e27dd-dfcf-4b42-a05a-7acb82400bed',
+  settingsConnectedCheck: 'https://www.figma.com/api/mcp/asset/d52e6192-4c9d-4ea3-9ec7-be8d9ff4d2ec',
+  settingsDisconnect: 'https://www.figma.com/api/mcp/asset/07dd1cec-0d84-4441-94b2-5c0765404c34',
+  settingsPrivacy: 'https://www.figma.com/api/mcp/asset/654e916c-51e1-4e22-8954-1062b222964b',
+  settingsNotifications: 'https://www.figma.com/api/mcp/asset/1146b4f9-5848-460d-b006-2285d2ef0abf',
+  settingsStorage: 'https://www.figma.com/api/mcp/asset/71630e2f-1cb9-4518-92c3-8fedc1acb11c',
+  settingsAbout: 'https://www.figma.com/api/mcp/asset/62d6165a-f25e-4e48-947d-f4dd27856139',
+  settingsExternalLink: 'https://www.figma.com/api/mcp/asset/7bd96ca9-7633-4c5f-ab76-4ee6add7e879'
 }
+
+const RECALL_SUGGESTIONS = [
+  'What time is my exam and where?',
+  "What's my flight number to Tokyo?",
+  'When is my dentist appointment?'
+]
 
 function normalizeBackendURL(raw) {
   const value = String(raw || '').trim()
@@ -72,6 +112,60 @@ function getRawBase64(dataUrl) {
     return dataUrl
   }
   return parts[1]
+}
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max)
+}
+
+function buildSelectionRect(startPoint, endPoint) {
+  const left = Math.min(startPoint.x, endPoint.x)
+  const top = Math.min(startPoint.y, endPoint.y)
+  const right = Math.max(startPoint.x, endPoint.x)
+  const bottom = Math.max(startPoint.y, endPoint.y)
+
+  return {
+    x: left,
+    y: top,
+    width: right - left,
+    height: bottom - top
+  }
+}
+
+function cropCapturedArea(dataUrl, selection, renderedSize) {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => {
+      const renderedWidth = Math.max(1, Math.round(renderedSize.width))
+      const renderedHeight = Math.max(1, Math.round(renderedSize.height))
+      const naturalWidth = Math.max(1, image.naturalWidth)
+      const naturalHeight = Math.max(1, image.naturalHeight)
+      const scaleX = naturalWidth / renderedWidth
+      const scaleY = naturalHeight / renderedHeight
+
+      const sx = clamp(Math.round(selection.x * scaleX), 0, naturalWidth - 1)
+      const sy = clamp(Math.round(selection.y * scaleY), 0, naturalHeight - 1)
+      const sw = clamp(Math.round(selection.width * scaleX), 1, naturalWidth - sx)
+      const sh = clamp(Math.round(selection.height * scaleY), 1, naturalHeight - sy)
+
+      const canvas = document.createElement('canvas')
+      canvas.width = sw
+      canvas.height = sh
+
+      const context = canvas.getContext('2d')
+      if (!context) {
+        reject(new Error('Unable to crop capture image.'))
+        return
+      }
+
+      context.drawImage(image, sx, sy, sw, sh, 0, 0, sw, sh)
+      resolve(canvas.toDataURL('image/png'))
+    }
+    image.onerror = () => {
+      reject(new Error('Failed to load capture preview.'))
+    }
+    image.src = dataUrl
+  })
 }
 
 function loadStoredAuthUser() {
@@ -106,14 +200,6 @@ function saveAuthSession(token, user) {
 function clearAuthSession() {
   window.localStorage.removeItem(AUTH_TOKEN_KEY)
   window.localStorage.removeItem(AUTH_USER_KEY)
-}
-
-function loadSkipTelegramSetup() {
-  return window.localStorage.getItem(SKIP_TELEGRAM_KEY) === '1'
-}
-
-function saveSkipTelegramSetup(skip) {
-  window.localStorage.setItem(SKIP_TELEGRAM_KEY, skip ? '1' : '0')
 }
 
 function formatFetchError(err, backendURL) {
@@ -262,8 +348,149 @@ function buildFactsCount(records) {
   }, 0)
 }
 
+function parseCaptureTimestamp(raw) {
+  if (!raw) {
+    return null
+  }
+
+  const ts = new Date(raw).getTime()
+  if (Number.isNaN(ts)) {
+    return null
+  }
+
+  return ts
+}
+
+function formatRelativeCaptureTime(raw) {
+  const timestamp = parseCaptureTimestamp(raw)
+  if (!timestamp) {
+    return 'Unknown time'
+  }
+
+  const diffMinutes = Math.floor((Date.now() - timestamp) / 60000)
+  if (diffMinutes <= 0) {
+    return 'Just now'
+  }
+  if (diffMinutes < 60) {
+    return `${diffMinutes} min${diffMinutes === 1 ? '' : 's'} ago`
+  }
+
+  const diffHours = Math.floor(diffMinutes / 60)
+  if (diffHours < 24) {
+    return `${diffHours} hour${diffHours === 1 ? '' : 's'} ago`
+  }
+
+  const diffDays = Math.floor(diffHours / 24)
+  if (diffDays === 1) {
+    return 'Yesterday'
+  }
+  if (diffDays < 7) {
+    return `${diffDays} days ago`
+  }
+
+  return formatCaptureDate(raw)
+}
+
+function formatCompactCount(value) {
+  const normalized = Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0
+  return normalized.toLocaleString('en-US')
+}
+
+function getDayGreeting() {
+  const hour = new Date().getHours()
+  if (hour < 12) {
+    return 'Good morning'
+  }
+  if (hour < 18) {
+    return 'Good afternoon'
+  }
+  return 'Good evening'
+}
+
+function getDashboardRecentVisual(tag) {
+  if (tag === 'travel') {
+    return {
+      icon: ICONS.dashboardRecentTravel,
+      tone: 'travel'
+    }
+  }
+  if (tag === 'health') {
+    return {
+      icon: ICONS.dashboardRecentHealth,
+      tone: 'health'
+    }
+  }
+
+  return {
+    icon: ICONS.dashboardRecentAcademic,
+    tone: 'academic'
+  }
+}
+
+function shortcutDisplayTokens(shortcutValue) {
+  return String(shortcutValue || '')
+    .split('+')
+    .map((segment) => {
+      const token = String(segment || '').trim()
+      const lower = token.toLowerCase()
+      if (!token) {
+        return ''
+      }
+      if (
+        lower === 'commandorcontrol' ||
+        lower === 'cmdorctrl' ||
+        lower === 'command' ||
+        lower === 'meta'
+      ) {
+        return '⌘'
+      }
+      if (lower === 'control' || lower === 'ctrl') {
+        return 'Ctrl'
+      }
+      if (lower === 'shift') {
+        return 'Shift'
+      }
+      if (lower === 'option' || lower === 'alt') {
+        return '⌥'
+      }
+      if (lower.startsWith('key') && token.length > 3) {
+        return token.slice(3).toUpperCase()
+      }
+      if (lower.startsWith('digit') && token.length > 5) {
+        return token.slice(5)
+      }
+      return token.length === 1 ? token.toUpperCase() : token
+    })
+    .filter(Boolean)
+}
+
+function getPlatformLabel() {
+  const raw = String(navigator.userAgentData?.platform || navigator.platform || '').toLowerCase()
+  if (raw.includes('mac')) {
+    return 'macOS'
+  }
+  if (raw.includes('win')) {
+    return 'Windows'
+  }
+  if (raw.includes('linux')) {
+    return 'Linux'
+  }
+  return 'Desktop'
+}
+
+function resolveScreen(authUser, isCheckingAuth) {
+  if (isCheckingAuth && !authUser) {
+    return 'loading'
+  }
+  if (!authUser) {
+    return 'login'
+  }
+  return 'workspace'
+}
+
 function App() {
   const backendURL = DEFAULT_BACKEND_URL
+  const regionSurfaceRef = useRef(null)
 
   const [authToken, setAuthToken] = useState(() => {
     return window.localStorage.getItem(AUTH_TOKEN_KEY) || ''
@@ -278,8 +505,8 @@ function App() {
   const [status, setStatus] = useState('Ready')
   const [question, setQuestion] = useState('')
   const [queryResult, setQueryResult] = useState(null)
+  const [lastAskedQuestion, setLastAskedQuestion] = useState('')
   const [captureResult, setCaptureResult] = useState(null)
-  const [imageDataURL, setImageDataURL] = useState('')
 
   const [isAsking, setIsAsking] = useState(false)
   const [isSavingCapture, setIsSavingCapture] = useState(false)
@@ -291,16 +518,28 @@ function App() {
   const [shortcut, setShortcut] = useState('CommandOrControl+Shift+S')
   const [shortcutDraft, setShortcutDraft] = useState('CommandOrControl+Shift+S')
   const [activeTab, setActiveTab] = useState(TAB_KEYS.CAPTURES)
+  const [displayTab, setDisplayTab] = useState(TAB_KEYS.CAPTURES)
+  const [tabStage, setTabStage] = useState('idle')
+  const [displayScreen, setDisplayScreen] = useState(() => resolveScreen(authUser, Boolean(authToken)))
+  const [screenStage, setScreenStage] = useState('idle')
 
   const [recentCaptures, setRecentCaptures] = useState([])
   const [isLoadingCaptures, setIsLoadingCaptures] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
   const [selectedCaptureID, setSelectedCaptureID] = useState('')
+  const [selectedCaptureIDs, setSelectedCaptureIDs] = useState([])
+  const selectAllCheckboxRef = useRef(null)
+  const [regionCaptureImage, setRegionCaptureImage] = useState('')
+  const [regionSelection, setRegionSelection] = useState(null)
+  const [selectionDragStart, setSelectionDragStart] = useState(null)
 
   const [telegramEventID, setTelegramEventID] = useState('')
   const [telegramLinkStatus, setTelegramLinkStatus] = useState('not_linked')
   const [botUsername, setBotUsername] = useState('')
-  const [allowTelegramSkip, setAllowTelegramSkip] = useState(loadSkipTelegramSetup)
+  const [autoSyncCaptures, setAutoSyncCaptures] = useState(true)
+  const [telegramQAMode, setTelegramQAMode] = useState(true)
+  const [autoCaptureOnShortcut, setAutoCaptureOnShortcut] = useState(true)
+  const [showCaptureConfirmation, setShowCaptureConfirmation] = useState(true)
 
   const authHeaders = useMemo(() => {
     if (!authToken) {
@@ -317,12 +556,20 @@ function App() {
     []
   )
 
-  const userID = authUser?.user_id || ''
   const statusTone = classifyStatusTone(status)
   const isTelegramLinked = telegramLinkStatus === 'linked'
-  const requiresTelegramSetup = Boolean(authUser) && !isTelegramLinked && !allowTelegramSkip
-  const showWorkspace = Boolean(authUser) && !requiresTelegramSetup
+  const showWorkspace = Boolean(authUser)
   const displayName = getDisplayName(authUser?.email)
+  const isRegionSelectorOpen = Boolean(regionCaptureImage)
+  const hasValidRegionSelection = Boolean(
+    regionSelection && regionSelection.width >= 8 && regionSelection.height >= 8
+  )
+  const captureNowLabel = isSavingCapture
+    ? 'Capturing...'
+    : isRegionSelectorOpen
+      ? 'Selecting...'
+      : 'Capture now'
+  const targetScreen = resolveScreen(authUser, isCheckingAuth)
 
   const filteredCaptures = useMemo(() => {
     const query = searchTerm.trim().toLowerCase()
@@ -356,13 +603,163 @@ function App() {
 
     return filteredCaptures[0]
   }, [filteredCaptures, selectedCaptureID])
+  const selectedCaptureIDsSet = useMemo(() => new Set(selectedCaptureIDs), [selectedCaptureIDs])
+  const selectedVisibleCaptureCount = useMemo(() => {
+    return filteredCaptures.reduce((count, record) => {
+      if (selectedCaptureIDsSet.has(record.id)) {
+        return count + 1
+      }
+      return count
+    }, 0)
+  }, [filteredCaptures, selectedCaptureIDsSet])
+  const allVisibleCapturesSelected = Boolean(filteredCaptures.length) && selectedVisibleCaptureCount === filteredCaptures.length
+  const hasPartialVisibleCaptureSelection = selectedVisibleCaptureCount > 0 && !allVisibleCapturesSelected
+  const deleteTargetCaptureIDs = useMemo(() => {
+    if (selectedCaptureIDs.length) {
+      return selectedCaptureIDs
+    }
+    if (selectedCapture?.id) {
+      return [selectedCapture.id]
+    }
+    return []
+  }, [selectedCapture, selectedCaptureIDs])
 
   const captureCount = recentCaptures.length
   const factsCount = buildFactsCount(recentCaptures)
+  const localStorageMB = Math.max(3, Math.round((captureCount * 0.6 + factsCount * 0.1) * 10) / 10)
+  const storageUsageRatio = Math.min(1, localStorageMB / STORAGE_LIMIT_MB)
+  const storageFill = Math.max(3, Math.round(storageUsageRatio * 1000) / 10)
+  const platformLabel = getPlatformLabel()
+  const shortcutTokens = shortcutDisplayTokens(shortcut)
+  const dashboardGreeting = getDayGreeting()
+  const dashboardRecentCaptures = useMemo(() => recentCaptures.slice(0, 3), [recentCaptures])
+  const capturesThisWeek = useMemo(() => {
+    const weekCutoff = Date.now() - 7 * 24 * 60 * 60 * 1000
+    return recentCaptures.reduce((count, record) => {
+      const timestamp = parseCaptureTimestamp(record?.captured_at)
+      if (timestamp && timestamp >= weekCutoff) {
+        return count + 1
+      }
+      return count
+    }, 0)
+  }, [recentCaptures])
+  const capturesToday = useMemo(() => {
+    const startOfToday = new Date()
+    startOfToday.setHours(0, 0, 0, 0)
+    const todayTimestamp = startOfToday.getTime()
+    return recentCaptures.reduce((count, record) => {
+      const timestamp = parseCaptureTimestamp(record?.captured_at)
+      if (timestamp && timestamp >= todayTimestamp) {
+        return count + 1
+      }
+      return count
+    }, 0)
+  }, [recentCaptures])
+  const recallReadyCount = useMemo(() => {
+    return recentCaptures.reduce((count, record) => {
+      if (Array.isArray(record?.fields) && record.fields.length) {
+        return count + 1
+      }
+      return count
+    }, 0)
+  }, [recentCaptures])
+  const averageConfidencePercent = useMemo(() => {
+    const confidenceValues = recentCaptures.flatMap((record) => {
+      if (!Array.isArray(record?.fields)) {
+        return []
+      }
+      return record.fields
+        .filter((field) => typeof field?.confidence === 'number')
+        .map((field) => field.confidence)
+    })
+
+    if (!confidenceValues.length) {
+      return null
+    }
+
+    const average = confidenceValues.reduce((sum, value) => sum + value, 0) / confidenceValues.length
+    return Math.round(average * 100)
+  }, [recentCaptures])
+  const dashboardSubtitle = useMemo(() => {
+    const captureSummary = captureCount
+      ? `You have ${Math.min(captureCount, 3)} recent capture${captureCount === 1 ? '' : 's'}.`
+      : 'No captures yet.'
+    const syncSummary = isTelegramLinked
+      ? 'Everything is synced with Telegram.'
+      : 'Connect Telegram in Settings for mobile recall.'
+    return `${captureSummary} ${syncSummary}`
+  }, [captureCount, isTelegramLinked])
+  const dashboardStats = useMemo(
+    () => [
+      {
+        key: 'captures',
+        icon: ICONS.dashboardMetricCaptures,
+        label: 'Total Captures',
+        value: formatCompactCount(captureCount),
+        detail: capturesThisWeek ? `+${capturesThisWeek} this week` : 'No captures this week'
+      },
+      {
+        key: 'facts',
+        icon: ICONS.dashboardMetricFacts,
+        label: 'Facts Extracted',
+        value: formatCompactCount(factsCount),
+        detail:
+          averageConfidencePercent === null ? 'No confidence score yet' : `${averageConfidencePercent}% avg confidence`
+      },
+      {
+        key: 'recall',
+        icon: ICONS.dashboardMetricRecall,
+        label: 'Recall Ready',
+        value: formatCompactCount(recallReadyCount),
+        detail: capturesToday ? `${capturesToday} captured today` : 'No captures today'
+      }
+    ],
+    [averageConfidencePercent, captureCount, capturesThisWeek, capturesToday, factsCount, recallReadyCount]
+  )
+  const loadingMessage = useMemo(() => {
+    if (isCheckingAuth && !authUser) {
+      return 'Restoring your workspace...'
+    }
+    if (isAuthenticating) {
+      return authMode === 'register' ? 'Creating your account...' : 'Signing you in...'
+    }
+    if (isSavingCapture) {
+      return 'Capturing and indexing screenshot...'
+    }
+    if (isAsking) {
+      return 'Looking through your memory graph...'
+    }
+    if (isStartingTelegramLink) {
+      return 'Preparing Telegram verification...'
+    }
+    if (isCheckingTelegramLink) {
+      return 'Checking Telegram link status...'
+    }
+    if (isDeletingCapture) {
+      return 'Deleting selected capture...'
+    }
+    if (isUpdatingShortcut) {
+      return 'Saving shortcut settings...'
+    }
+    return ''
+  }, [
+    authMode,
+    authUser,
+    isAsking,
+    isAuthenticating,
+    isCheckingAuth,
+    isCheckingTelegramLink,
+    isDeletingCapture,
+    isSavingCapture,
+    isStartingTelegramLink,
+    isUpdatingShortcut
+  ])
 
   const loadRecentCaptures = useCallback(async () => {
     if (!authUser) {
       setRecentCaptures([])
+      setSelectedCaptureID('')
+      setSelectedCaptureIDs([])
       return
     }
 
@@ -382,7 +779,17 @@ function App() {
 
       setRecentCaptures(data.captures)
       if (data.captures.length) {
-        setSelectedCaptureID((prev) => prev || data.captures[0].id)
+        const validCaptureIDs = new Set(data.captures.map((record) => record.id))
+        setSelectedCaptureID((prev) => {
+          if (validCaptureIDs.has(prev)) {
+            return prev
+          }
+          return data.captures[0].id
+        })
+        setSelectedCaptureIDs((prev) => prev.filter((captureID) => validCaptureIDs.has(captureID)))
+      } else {
+        setSelectedCaptureID('')
+        setSelectedCaptureIDs([])
       }
     } catch {
       // Keep existing view if fetch fails.
@@ -391,31 +798,14 @@ function App() {
     }
   }, [authHeaders, authUser, backendURL])
 
-  const captureAndSave = useCallback(async () => {
-    if (!authUser) {
-      setStatus('Please log in to capture and save.')
-      return
-    }
-
-    if (!hasElectronAPI) {
-      setStatus('Capture only works inside Electron runtime.')
-      return
-    }
-
-    try {
-      setIsSavingCapture(true)
-      setStatus('Capturing screen...')
-
-      const dataUrl = await window.electronAPI.captureScreen()
-      setImageDataURL(dataUrl)
-
+  const saveCaptureDataUrl = useCallback(
+    async (dataUrl, sourceTitle) => {
       const payload = {
-        user_id: userID,
         ocr_text: '',
         image_base64: getRawBase64(dataUrl),
         tag_hint: '',
         source_app: 'desktop',
-        source_title: 'Quick Capture'
+        source_title: sourceTitle
       }
 
       setStatus('Saving capture...')
@@ -430,20 +820,241 @@ function App() {
 
       const data = await res.json()
       if (!res.ok) {
-        setStatus(`Capture failed: ${data.error || 'unknown error'}`)
-        return
+        throw new Error(data?.error || 'unknown error')
       }
 
       setCaptureResult(data)
-      setStatus('Capture saved successfully.')
       await loadRecentCaptures()
       setActiveTab(TAB_KEYS.CAPTURES)
+    },
+    [authHeaders, backendURL, loadRecentCaptures]
+  )
+
+  const captureAndSaveShortcut = useCallback(async () => {
+    if (!authUser) {
+      setStatus('Please log in to capture and save.')
+      return
+    }
+
+    if (!hasElectronAPI) {
+      setStatus('Capture only works inside Electron runtime.')
+      return
+    }
+
+    try {
+      setIsSavingCapture(true)
+      setStatus('Capturing full screen...')
+      const dataUrl = await window.electronAPI.captureScreen()
+      await saveCaptureDataUrl(dataUrl, 'Quick Capture')
+      setStatus(showCaptureConfirmation ? CAPTURE_SUCCESS_STATUS : 'Ready')
     } catch (err) {
       setStatus(`Capture failed: ${formatFetchError(err, backendURL)}`)
     } finally {
       setIsSavingCapture(false)
     }
-  }, [authHeaders, authUser, backendURL, hasElectronAPI, loadRecentCaptures, userID])
+  }, [authUser, backendURL, hasElectronAPI, saveCaptureDataUrl, showCaptureConfirmation])
+
+  const closeRegionSelector = useCallback(() => {
+    setRegionCaptureImage('')
+    setRegionSelection(null)
+    setSelectionDragStart(null)
+  }, [])
+
+  const beginRegionCapture = useCallback(async () => {
+    if (!authUser) {
+      setStatus('Please log in to capture and save.')
+      return
+    }
+
+    if (!hasElectronAPI) {
+      setStatus('Capture only works inside Electron runtime.')
+      return
+    }
+
+    try {
+      setIsSavingCapture(true)
+      setStatus('Preparing region capture...')
+
+      const captureMethod =
+        window.electronAPI.captureScreenForSelection || window.electronAPI.captureScreen
+      const dataUrl = await captureMethod()
+      if (!dataUrl) {
+        setStatus('Capture failed: empty screenshot.')
+        return
+      }
+
+      setRegionCaptureImage(dataUrl)
+      setRegionSelection(null)
+      setSelectionDragStart(null)
+      setStatus('Drag on the preview to choose a region.')
+    } catch (err) {
+      setStatus(`Capture failed: ${formatFetchError(err, backendURL)}`)
+    } finally {
+      setIsSavingCapture(false)
+    }
+  }, [authUser, backendURL, hasElectronAPI])
+
+  const onShortcutCapture = useCallback(async () => {
+    setStatus('Shortcut triggered.')
+    if (autoCaptureOnShortcut) {
+      await captureAndSaveShortcut()
+      return
+    }
+    await beginRegionCapture()
+  }, [autoCaptureOnShortcut, beginRegionCapture, captureAndSaveShortcut])
+
+  const getPointerInRegionSurface = useCallback((event) => {
+    const surface = regionSurfaceRef.current
+    if (!surface) {
+      return null
+    }
+
+    const bounds = surface.getBoundingClientRect()
+    if (!bounds.width || !bounds.height) {
+      return null
+    }
+
+    return {
+      x: clamp(event.clientX - bounds.left, 0, bounds.width),
+      y: clamp(event.clientY - bounds.top, 0, bounds.height)
+    }
+  }, [])
+
+  const onRegionPointerDown = useCallback(
+    (event) => {
+      if (!regionCaptureImage) {
+        return
+      }
+
+      const point = getPointerInRegionSurface(event)
+      if (!point) {
+        return
+      }
+
+      event.preventDefault()
+      if (event.currentTarget?.setPointerCapture) {
+        event.currentTarget.setPointerCapture(event.pointerId)
+      }
+
+      setSelectionDragStart(point)
+      setRegionSelection({
+        x: point.x,
+        y: point.y,
+        width: 0,
+        height: 0
+      })
+    },
+    [getPointerInRegionSurface, regionCaptureImage]
+  )
+
+  const onRegionPointerMove = useCallback(
+    (event) => {
+      if (!selectionDragStart) {
+        return
+      }
+
+      const point = getPointerInRegionSurface(event)
+      if (!point) {
+        return
+      }
+
+      setRegionSelection(buildSelectionRect(selectionDragStart, point))
+    },
+    [getPointerInRegionSurface, selectionDragStart]
+  )
+
+  const onRegionPointerUp = useCallback(
+    (event) => {
+      if (!selectionDragStart) {
+        return
+      }
+
+      const point = getPointerInRegionSurface(event)
+      if (point) {
+        const nextRect = buildSelectionRect(selectionDragStart, point)
+        if (nextRect.width < 8 || nextRect.height < 8) {
+          setRegionSelection(null)
+        } else {
+          setRegionSelection(nextRect)
+        }
+      }
+
+      if (event.currentTarget?.hasPointerCapture?.(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId)
+      }
+      setSelectionDragStart(null)
+    },
+    [getPointerInRegionSurface, selectionDragStart]
+  )
+
+  const onRegionPointerCancel = useCallback(() => {
+    setSelectionDragStart(null)
+  }, [])
+
+  const onConfirmRegionCapture = useCallback(async () => {
+    if (!regionCaptureImage) {
+      return
+    }
+
+    if (!hasValidRegionSelection || !regionSelection) {
+      setStatus('Select a region before saving.')
+      return
+    }
+
+    const surface = regionSurfaceRef.current
+    if (!surface) {
+      setStatus('Capture failed: selection surface unavailable.')
+      return
+    }
+
+    try {
+      setIsSavingCapture(true)
+      const croppedDataUrl = await cropCapturedArea(regionCaptureImage, regionSelection, {
+        width: surface.clientWidth,
+        height: surface.clientHeight
+      })
+      await saveCaptureDataUrl(croppedDataUrl, 'Region Capture')
+      closeRegionSelector()
+      setStatus(showCaptureConfirmation ? CAPTURE_SUCCESS_STATUS : 'Ready')
+    } catch (err) {
+      setStatus(`Capture failed: ${formatFetchError(err, backendURL)}`)
+    } finally {
+      setIsSavingCapture(false)
+    }
+  }, [
+    backendURL,
+    closeRegionSelector,
+    hasValidRegionSelection,
+    regionCaptureImage,
+    regionSelection,
+    saveCaptureDataUrl,
+    showCaptureConfirmation
+  ])
+
+  const onCancelRegionCapture = useCallback(() => {
+    closeRegionSelector()
+    setStatus('Capture cancelled.')
+  }, [closeRegionSelector])
+
+  useEffect(() => {
+    if (!isRegionSelectorOpen) {
+      return
+    }
+
+    function onEscape(event) {
+      if (event.key !== 'Escape') {
+        return
+      }
+
+      event.preventDefault()
+      onCancelRegionCapture()
+    }
+
+    window.addEventListener('keydown', onEscape)
+    return () => {
+      window.removeEventListener('keydown', onEscape)
+    }
+  }, [isRegionSelectorOpen, onCancelRegionCapture])
 
   useEffect(() => {
     if (!authToken) {
@@ -517,8 +1128,7 @@ function App() {
       }
 
       const unbindCapture = window.electronAPI.onCaptureShortcut(async () => {
-        setStatus('Shortcut triggered.')
-        await captureAndSave()
+        await onShortcutCapture()
       })
 
       const unbindShortcutUpdated = window.electronAPI.onShortcutUpdated((payload) => {
@@ -539,7 +1149,7 @@ function App() {
     return () => {
       unsubscribe()
     }
-  }, [captureAndSave, hasElectronAPI])
+  }, [hasElectronAPI, onShortcutCapture])
 
   useEffect(() => {
     if (!authToken || !authUser?.user_id) {
@@ -566,8 +1176,6 @@ function App() {
           setTelegramLinkStatus(nextStatus)
           if (nextStatus === 'linked') {
             setTelegramEventID('')
-            setAllowTelegramSkip(false)
-            saveSkipTelegramSetup(false)
           }
         }
       } catch {
@@ -596,7 +1204,13 @@ function App() {
     const timer = window.setInterval(async () => {
       try {
         const res = await fetch(
-          `${backendURL}/v1/integrations/telegram/status?event_id=${encodeURIComponent(telegramEventID)}`
+          `${backendURL}/v1/integrations/telegram/status?event_id=${encodeURIComponent(telegramEventID)}`,
+          {
+            method: 'GET',
+            headers: {
+              ...authHeaders
+            }
+          }
         )
         if (!res.ok) {
           return
@@ -606,8 +1220,6 @@ function App() {
         if (data?.status) {
           setTelegramLinkStatus(data.status)
           if (data.status === 'linked') {
-            setAllowTelegramSkip(false)
-            saveSkipTelegramSetup(false)
             setStatus('Telegram linked successfully.')
             await loadRecentCaptures()
           }
@@ -620,7 +1232,7 @@ function App() {
     return () => {
       window.clearInterval(timer)
     }
-  }, [backendURL, loadRecentCaptures, telegramEventID, telegramLinkStatus])
+  }, [authHeaders, backendURL, loadRecentCaptures, telegramEventID, telegramLinkStatus])
 
   useEffect(() => {
     if (!showWorkspace) {
@@ -635,6 +1247,56 @@ function App() {
       setSelectedCaptureID(String(captureResult.capture_id || ''))
     }
   }, [captureResult, selectedCapture])
+
+  useEffect(() => {
+    if (selectAllCheckboxRef.current) {
+      selectAllCheckboxRef.current.indeterminate = hasPartialVisibleCaptureSelection
+    }
+  }, [hasPartialVisibleCaptureSelection])
+
+  useEffect(() => {
+    if (displayTab === activeTab) {
+      return
+    }
+
+    let settleTimer = 0
+    setTabStage('exit')
+
+    const switchTimer = window.setTimeout(() => {
+      setDisplayTab(activeTab)
+      setTabStage('enter')
+      settleTimer = window.setTimeout(() => {
+        setTabStage('idle')
+      }, TAB_ENTER_DURATION_MS)
+    }, TAB_EXIT_DURATION_MS)
+
+    return () => {
+      window.clearTimeout(switchTimer)
+      window.clearTimeout(settleTimer)
+    }
+  }, [activeTab, displayTab])
+
+  useEffect(() => {
+    if (displayScreen === targetScreen) {
+      return
+    }
+
+    let settleTimer = 0
+    setScreenStage('exit')
+
+    const switchTimer = window.setTimeout(() => {
+      setDisplayScreen(targetScreen)
+      setScreenStage('enter')
+      settleTimer = window.setTimeout(() => {
+        setScreenStage('idle')
+      }, SCREEN_ENTER_DURATION_MS)
+    }, SCREEN_EXIT_DURATION_MS)
+
+    return () => {
+      window.clearTimeout(switchTimer)
+      window.clearTimeout(settleTimer)
+    }
+  }, [displayScreen, targetScreen])
 
   async function onAuthSubmit(event) {
     event.preventDefault()
@@ -668,8 +1330,6 @@ function App() {
       setAuthPassword('')
       setTelegramEventID('')
       setTelegramLinkStatus('checking')
-      setAllowTelegramSkip(false)
-      saveSkipTelegramSetup(false)
       saveAuthSession(data.token, data.user)
       setStatus(authMode === 'register' ? 'Account created and logged in.' : 'Logged in.')
     } catch (err) {
@@ -684,14 +1344,19 @@ function App() {
     setAuthToken('')
     setAuthUser(null)
     setAuthPassword('')
+    setQuestion('')
+    setLastAskedQuestion('')
     setTelegramEventID('')
     setTelegramLinkStatus('not_linked')
     setRecentCaptures([])
+    setSelectedCaptureID('')
+    setSelectedCaptureIDs([])
     setCaptureResult(null)
     setQueryResult(null)
+    setRegionCaptureImage('')
+    setRegionSelection(null)
+    setSelectionDragStart(null)
     setActiveTab(TAB_KEYS.CAPTURES)
-    setAllowTelegramSkip(false)
-    saveSkipTelegramSetup(false)
     setStatus('Logged out.')
   }
 
@@ -741,7 +1406,7 @@ function App() {
           'Content-Type': 'application/json',
           ...authHeaders
         },
-        body: JSON.stringify({ user_id: userID })
+        body: JSON.stringify({})
       })
 
       const data = await res.json()
@@ -756,8 +1421,6 @@ function App() {
       setBotUsername(data.bot_username || '')
 
       if (nextStatus === 'linked') {
-        setAllowTelegramSkip(false)
-        saveSkipTelegramSetup(false)
         setStatus('Telegram is already linked for this account.')
       } else {
         setStatus('Telegram event ID ready. Send it to your bot to complete linking.')
@@ -777,7 +1440,13 @@ function App() {
     try {
       setIsCheckingTelegramLink(true)
       const res = await fetch(
-        `${backendURL}/v1/integrations/telegram/status?event_id=${encodeURIComponent(telegramEventID)}`
+        `${backendURL}/v1/integrations/telegram/status?event_id=${encodeURIComponent(telegramEventID)}`,
+        {
+          method: 'GET',
+          headers: {
+            ...authHeaders
+          }
+        }
       )
       const data = await res.json()
       if (!res.ok) {
@@ -788,8 +1457,6 @@ function App() {
       if (data?.status) {
         setTelegramLinkStatus(data.status)
         if (data.status === 'linked') {
-          setAllowTelegramSkip(false)
-          saveSkipTelegramSetup(false)
           setStatus('Telegram linked successfully.')
         } else {
           setStatus(`Current Telegram status: ${data.status}`)
@@ -802,21 +1469,14 @@ function App() {
     }
   }
 
-  function onSkipTelegramSetup() {
-    setAllowTelegramSkip(true)
-    saveSkipTelegramSetup(true)
-    setStatus('Telegram setup skipped for now.')
-  }
-
-  async function onAsk(event) {
-    event.preventDefault()
-
+  async function submitRecallQuestion(rawQuestion) {
     if (!authUser) {
       setStatus('Please log in to ask SnapRecall.')
       return
     }
 
-    if (!question.trim()) {
+    const normalizedQuestion = String(rawQuestion || '').trim()
+    if (!normalizedQuestion) {
       setStatus('Enter a question first.')
       return
     }
@@ -832,8 +1492,7 @@ function App() {
           ...authHeaders
         },
         body: JSON.stringify({
-          user_id: userID,
-          question: question.trim()
+          question: normalizedQuestion
         })
       })
 
@@ -844,6 +1503,8 @@ function App() {
       }
 
       setQueryResult(data)
+      setLastAskedQuestion(normalizedQuestion)
+      setQuestion('')
       setStatus('Answer ready.')
       setActiveTab(TAB_KEYS.RECALL)
     } catch (err) {
@@ -851,6 +1512,16 @@ function App() {
     } finally {
       setIsAsking(false)
     }
+  }
+
+  async function onAsk(event) {
+    event.preventDefault()
+    await submitRecallQuestion(question)
+  }
+
+  async function onAskSuggestion(nextQuestion) {
+    setQuestion(nextQuestion)
+    await submitRecallQuestion(nextQuestion)
   }
 
   async function onCopyEventID() {
@@ -866,47 +1537,144 @@ function App() {
     }
   }
 
+  function onToggleCaptureSelection(captureID, checked) {
+    setSelectedCaptureIDs((prev) => {
+      const next = new Set(prev)
+      if (checked) {
+        next.add(captureID)
+      } else {
+        next.delete(captureID)
+      }
+      return Array.from(next)
+    })
+  }
+
+  function onToggleSelectAllVisible(checked) {
+    const visibleCaptureIDs = filteredCaptures.map((record) => record.id)
+    setSelectedCaptureIDs((prev) => {
+      const next = new Set(prev)
+      if (checked) {
+        visibleCaptureIDs.forEach((captureID) => next.add(captureID))
+      } else {
+        visibleCaptureIDs.forEach((captureID) => next.delete(captureID))
+      }
+      return Array.from(next)
+    })
+  }
+
+  function onClearCaptureSelection() {
+    setSelectedCaptureIDs([])
+  }
+
   async function onDeleteSelectedCapture() {
-    if (!selectedCapture) {
+    const targetCaptureIDs = deleteTargetCaptureIDs
+    if (!targetCaptureIDs.length) {
       return
     }
 
-    const confirmed = window.confirm(`Delete "${extractTitle(selectedCapture)}"? This cannot be undone.`)
+    const confirmationRecord =
+      targetCaptureIDs.length === 1
+        ? recentCaptures.find((record) => record.id === targetCaptureIDs[0]) || selectedCapture
+        : null
+    const confirmationLabel =
+      targetCaptureIDs.length === 1
+        ? `"${extractTitle(confirmationRecord)}"`
+        : `${targetCaptureIDs.length} selected captures`
+    const confirmed = window.confirm(`Delete ${confirmationLabel}? This cannot be undone.`)
     if (!confirmed) {
       return
     }
 
     try {
       setIsDeletingCapture(true)
-      setStatus('Deleting capture...')
+      setStatus(targetCaptureIDs.length > 1 ? `Deleting ${targetCaptureIDs.length} captures...` : 'Deleting capture...')
 
-      const res = await fetch(`${backendURL}/v1/captures/${encodeURIComponent(selectedCapture.id)}`, {
-        method: 'DELETE',
-        headers: {
-          ...authHeaders
+      const deletedCaptureIDs = []
+      const failedDeletes = []
+
+      for (const captureID of targetCaptureIDs) {
+        try {
+          const res = await fetch(`${backendURL}/v1/captures/${encodeURIComponent(captureID)}`, {
+            method: 'DELETE',
+            headers: {
+              ...authHeaders
+            }
+          })
+          const data = await res.json()
+          if (!res.ok) {
+            failedDeletes.push(data?.error || `request failed (${res.status})`)
+            continue
+          }
+          deletedCaptureIDs.push(captureID)
+        } catch (err) {
+          failedDeletes.push(formatFetchError(err, backendURL))
         }
-      })
-      const data = await res.json()
-      if (!res.ok) {
-        setStatus(`Delete failed: ${data?.error || 'unknown error'}`)
+      }
+
+      if (!deletedCaptureIDs.length) {
+        const firstFailure = failedDeletes[0] || 'unknown error'
+        setStatus(`Delete failed: ${firstFailure}`)
         return
       }
 
-      if (captureResult?.capture_id === selectedCapture.id) {
+      const deletedCaptureIDsSet = new Set(deletedCaptureIDs)
+
+      setRecentCaptures((prev) => prev.filter((record) => !deletedCaptureIDsSet.has(record.id)))
+      setSelectedCaptureIDs((prev) => prev.filter((captureID) => !deletedCaptureIDsSet.has(captureID)))
+      setSelectedCaptureID((prev) => (deletedCaptureIDsSet.has(prev) ? '' : prev))
+
+      if (captureResult?.capture_id && deletedCaptureIDsSet.has(captureResult.capture_id)) {
         setCaptureResult(null)
       }
-      if (queryResult?.source_capture_id === selectedCapture.id) {
+      if (queryResult?.source_capture_id && deletedCaptureIDsSet.has(queryResult.source_capture_id)) {
         setQueryResult(null)
+        setLastAskedQuestion('')
       }
 
-      setSelectedCaptureID('')
       await loadRecentCaptures()
-      setStatus('Capture deleted.')
+
+      if (failedDeletes.length) {
+        setStatus(`Deleted ${deletedCaptureIDs.length}. Failed ${failedDeletes.length}.`)
+      } else if (deletedCaptureIDs.length > 1) {
+        setStatus(`Deleted ${deletedCaptureIDs.length} captures.`)
+      } else {
+        setStatus('Capture deleted.')
+      }
     } catch (err) {
       setStatus(`Delete failed: ${formatFetchError(err, backendURL)}`)
     } finally {
       setIsDeletingCapture(false)
     }
+  }
+
+  function renderLoadingScreen() {
+    return (
+      <div className="screen-frame">
+        <div className="loading-shell">
+          <div className="loading-orb" />
+          <h1 className="text-reveal text-delay-1">Loading SnapRecall</h1>
+          <p className="text-reveal text-delay-2">Syncing your session and latest captures.</p>
+          <div className="loading-progress">
+            <span />
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  function renderGlobalLoader() {
+    if (!loadingMessage || displayScreen === 'loading') {
+      return null
+    }
+
+    return (
+      <div className="global-loader" role="status" aria-live="polite">
+        <span className="global-loader-spinner" aria-hidden="true" />
+        <span className="global-loader-copy" key={loadingMessage}>
+          {loadingMessage}
+        </span>
+      </div>
+    )
   }
 
   function renderLoginScreen() {
@@ -921,8 +1689,10 @@ function App() {
               <div className="brand-icon">
                 <img src={ICONS.appBolt} alt="" />
               </div>
-              <h2>SnapRecall</h2>
-              <p>Capture in 1 second. Recall in 1 second. Your AI-powered screenshot memory.</p>
+              <h2 className="text-reveal text-delay-1">SnapRecall</h2>
+              <p className="text-reveal text-delay-2">
+                Capture in 1 second. Recall in 1 second. Your AI-powered screenshot memory.
+              </p>
               <div className="brand-tags">
                 <span>AI Extraction</span>
                 <span>Telegram Sync</span>
@@ -932,8 +1702,10 @@ function App() {
           </aside>
 
           <section className="login-panel">
-            <h1>{isRegister ? 'Create your account' : 'Welcome back'}</h1>
-            <p>{isRegister ? 'Sign up to start saving captures' : 'Sign in to access your captures'}</p>
+            <h1 className="text-reveal text-delay-1">{isRegister ? 'Create your account' : 'Welcome back'}</h1>
+            <p className="text-reveal text-delay-2">
+              {isRegister ? 'Sign up to start saving captures' : 'Sign in to access your captures'}
+            </p>
 
             <div className="oauth-row">
               <button type="button" className="ghost-cta" disabled>
@@ -1008,161 +1780,66 @@ function App() {
     )
   }
 
-  function renderTelegramSetup() {
-    const hasCode = telegramEventID && telegramLinkStatus !== 'not_linked'
-    const steps = hasCode
-      ? [
-          { number: '1', label: 'Open Bot', state: 'done' },
-          { number: '2', label: 'Verify', state: 'active' },
-          { number: '3', label: 'Configure', state: isTelegramLinked ? 'done' : '' },
-          { number: '4', label: 'Done', state: isTelegramLinked ? 'done' : '' }
-        ]
-      : [
-          { number: '1', label: 'Open Bot', state: 'active' },
-          { number: '2', label: 'Link', state: '' },
-          { number: '3', label: 'Configure', state: '' }
-        ]
-
-    return (
-      <div className="screen-frame">
-        <div className="telegram-shell">
-          <div className="telegram-head-icon">
-            <img src={ICONS.telegram} alt="" />
-          </div>
-          <h1>Connect Telegram</h1>
-          <p>Link your Telegram to capture and recall on the go</p>
-
-	          <div className={`telegram-steps ${hasCode ? 'mode-verify' : 'mode-open'}`}>
-	            {steps.map((step) => (
-	              <div key={`${step.number}-${step.label}`} className={`step ${step.state}`}>
-	                <span>{step.state === 'done' ? '✓' : step.number}</span>
-	                <label>{step.label}</label>
-	              </div>
-	            ))}
-	          </div>
-
-          <div className="telegram-card">
-            {!hasCode ? (
-              <>
-                <h2>Step 1: Open SnapRecall Bot</h2>
-	                <p>
-	                  Open Telegram and start a conversation with our bot. This bot will receive your
-	                  captures and answer your questions.
-	                </p>
-
-                <div className="telegram-bot-card">
-                  <div className="bot-identity">
-                    <div className="bot-icon">
-                      <img src={ICONS.telegramLink} alt="" />
-                    </div>
-                    <div>
-                      <strong>{botUsername ? `@${botUsername}` : '@SnapRecallBot'}</strong>
-                      <span>SnapRecall AI Assistant</span>
-                    </div>
-                  </div>
-
-                  <a
-                    className="telegram-open-link"
-                    href={botUsername ? `https://t.me/${botUsername}` : 'https://t.me'}
-                    target="_blank"
-                    rel="noreferrer"
-	                  >
-	                    <span>Open in Telegram</span>
-	                    <img src={ICONS.telegramOpen} alt="" />
-	                  </a>
-	                </div>
-
-                <button
-                  type="button"
-                  className="primary-gradient"
-                  onClick={onStartTelegramLink}
-                  disabled={isStartingTelegramLink || isCheckingTelegramLink}
-                >
-                  <span>{isStartingTelegramLink ? 'Generating Event ID...' : "I've opened the bot"}</span>
-                  <img src={ICONS.arrowRight} alt="" />
-                </button>
-              </>
-            ) : (
-              <>
-                <h2>Step 2: Send verification code</h2>
-                <p>Send this code to your SnapRecall bot in Telegram to verify your account link.</p>
-
-                <div className="telegram-code-block">
-                  <label>Your verification code</label>
-                  <div className="code-row">
-                    <code>{telegramEventID}</code>
-                    <button type="button" onClick={onCopyEventID}>
-                      <img src={ICONS.copy} alt="" />
-                      Copy
-                    </button>
-                  </div>
-	                  <small>Code expires in 10 minutes</small>
-	                  
-	                </div>
-
-                <button
-                  type="button"
-                  className="primary-gradient"
-                  onClick={onCheckTelegramStatus}
-                  disabled={isCheckingTelegramLink}
-                >
-                  <span>{isCheckingTelegramLink ? 'Checking Link...' : "I've sent the code"}</span>
-                  <img src={ICONS.arrowRight} alt="" />
-                </button>
-              </>
-            )}
-          </div>
-
-          <button type="button" className="link-inline subtle" onClick={onSkipTelegramSetup}>
-            Skip for now — you can connect later in Settings
-          </button>
-          <div className="privacy-note">
-            <img src={ICONS.check} alt="" />
-            <span>End-to-end encrypted · Your data stays private</span>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
   function renderCaptureRows() {
     if (isLoadingCaptures) {
-      return <div className="history-empty">Loading captures...</div>
+      return (
+        <div className="history-skeleton-list" aria-live="polite" aria-busy="true">
+          {Array.from({ length: 4 }, (_, index) => (
+            <div key={`capture-skeleton-${index}`} className="history-skeleton-row">
+              <span className="skeleton-dot" />
+              <div className="skeleton-lines">
+                <span className="skeleton-line skeleton-line-long" />
+                <span className="skeleton-line" />
+              </div>
+            </div>
+          ))}
+        </div>
+      )
     }
 
     if (!filteredCaptures.length) {
       return (
         <div className="history-empty">
           <strong>No captures yet.</strong>
-          <p>Use the capture button above to save your first record.</p>
+          <p>Capture now to start building your memory timeline.</p>
         </div>
       )
     }
 
-    return filteredCaptures.map((record) => {
+    return filteredCaptures.map((record, index) => {
       const tag = extractTag(record)
       const active = selectedCapture?.id === record.id
+      const checked = selectedCaptureIDsSet.has(record.id)
       return (
-        <button
-          key={record.id}
-          type="button"
-          className={`history-row ${active ? 'active' : ''}`}
-          onClick={() => setSelectedCaptureID(record.id)}
-        >
-          <div className="history-icon-wrap">
-            <img src={getTagIcon(tag)} alt="" />
-          </div>
-          <div className="history-content">
-            <div className="history-top">
-              <h3>{extractTitle(record)}</h3>
-              <span className="tag-pill">{tag}</span>
+        <div key={record.id} className={`history-row-shell ${checked ? 'checked' : ''}`}>
+          <label className="history-row-checkbox" aria-label={`Select ${extractTitle(record)}`}>
+            <input
+              type="checkbox"
+              checked={checked}
+              onChange={(event) => onToggleCaptureSelection(record.id, event.target.checked)}
+            />
+          </label>
+          <button
+            type="button"
+            className={`history-row ${active ? 'active' : ''}`}
+            onClick={() => setSelectedCaptureID(record.id)}
+            style={{ '--row-delay': `${index * 40}ms` }}
+          >
+            <div className="history-icon-wrap">
+              <img src={getTagIcon(tag)} alt="" />
             </div>
-            <p>
-              {record.fields?.length || 1} facts · {confidenceLabel(record.fields)} · {formatCaptureDate(record.captured_at)}
-            </p>
-          </div>
-          <img src={ICONS.rowExpand} alt="" className="row-expand" />
-        </button>
+            <div className="history-content">
+              <div className="history-top">
+                <h3>{extractTitle(record)}</h3>
+                <span className="tag-pill">{tag}</span>
+              </div>
+              <p>
+                {record.fields?.length || 1} facts · {confidenceLabel(record.fields)} · {formatCaptureDate(record.captured_at)}
+              </p>
+            </div>
+            <img src={ICONS.rowExpand} alt="" className="row-expand" />
+          </button>
+        </div>
       )
     })
   }
@@ -1171,193 +1848,733 @@ function App() {
     const record = selectedCapture
     if (!record) {
       return (
-        <div className="capture-demo-body">
-          <div className="capture-preview-empty">Capture details will appear here.</div>
+        <div className="capture-focus-empty">
+          <strong>Select a capture</strong>
+          <p>Pick an item from the list to review its summary and extracted facts.</p>
         </div>
       )
     }
 
+    const tag = extractTag(record)
     const sourceTitle = record.source?.title || 'Captured screen'
-    const lines =
-      Array.isArray(record.fields) && record.fields.length
-        ? record.fields.slice(0, 5).map((field) => `${field.type}: ${field.value}`)
-        : [record.summary || 'No extracted fields yet.']
+    const fields = Array.isArray(record.fields) ? record.fields : []
+    const summary =
+      typeof record.summary === 'string' && record.summary.trim()
+        ? record.summary.trim()
+        : 'No summary available for this capture yet.'
+    const visibleFields = fields.slice(0, 8)
 
     return (
-      <div className="capture-demo-body">
-        {imageDataURL ? (
-          <img className="capture-preview-image" src={imageDataURL} alt="Latest captured screen" />
-        ) : (
-          <div className="capture-preview-empty capture-preview-inline">
-            Live screenshot preview appears after your first capture.
+      <div className="capture-focus-content">
+        <div className="capture-focus-head">
+          <div>
+            <p className="capture-focus-label">{tag}</p>
+            <h2>{extractTitle(record)}</h2>
           </div>
-        )}
-        <small>{sourceTitle}</small>
-        <h4>{extractTitle(record)}</h4>
-        {lines.map((line) => (
-          <p key={`${record.id}-${line}`}>{line}</p>
-        ))}
+          <span>{formatCaptureDate(record.captured_at)}</span>
+        </div>
+
+        <div className="capture-focus-badges">
+          <span>{fields.length || 1} facts</span>
+          <span>{confidenceLabel(fields)}</span>
+        </div>
+
+        <section className="capture-focus-section">
+          <h3>Summary</h3>
+          <p>{summary}</p>
+        </section>
+
+        <section className="capture-focus-section">
+          <h3>Source</h3>
+          <p>{sourceTitle}</p>
+        </section>
+
+        <section className="capture-focus-section">
+          <h3>Extracted facts</h3>
+          {visibleFields.length ? (
+            <ul className="capture-facts-list">
+              {visibleFields.map((field, index) => {
+                const fieldLabel =
+                  typeof field?.type === 'string' && field.type.trim() ? field.type.trim() : `Fact ${index + 1}`
+                const fieldValue =
+                  typeof field?.value === 'string' && field.value.trim() ? field.value.trim() : 'No value'
+                const fieldConfidence =
+                  typeof field?.confidence === 'number' ? `${Math.round(field.confidence * 100)}% confidence` : null
+
+                return (
+                  <li key={`${record.id}-${fieldLabel}-${index}`}>
+                    <div>
+                      <b>{fieldLabel}</b>
+                      {fieldConfidence ? <small>{fieldConfidence}</small> : null}
+                    </div>
+                    <p>{fieldValue}</p>
+                  </li>
+                )
+              })}
+            </ul>
+          ) : (
+            <p className="capture-facts-empty">No structured fields extracted for this capture.</p>
+          )}
+          {fields.length > visibleFields.length ? (
+            <small className="capture-facts-more">Showing first {visibleFields.length} facts.</small>
+          ) : null}
+        </section>
       </div>
+    )
+  }
+
+  function renderDashboardTab() {
+    return (
+      <div className="workspace-content dashboard-view">
+        <div className="dashboard-head">
+          <h1 className="text-reveal text-delay-1">{dashboardGreeting}</h1>
+          <p className="text-reveal text-delay-2">{dashboardSubtitle}</p>
+        </div>
+
+        <div className="dashboard-metrics-grid">
+          {dashboardStats.map((item) => (
+            <article key={item.key} className="dashboard-metric-card">
+              <div className="dashboard-metric-card-head">
+                <img src={item.icon} alt="" />
+                <img src={ICONS.dashboardMetricTrend} alt="" />
+              </div>
+              <strong>{item.value}</strong>
+              <p>{item.label}</p>
+              <small>{item.detail}</small>
+            </article>
+          ))}
+        </div>
+
+        <div className="dashboard-actions-grid">
+          <button
+            type="button"
+            className="dashboard-action-card primary"
+            onClick={beginRegionCapture}
+            disabled={isSavingCapture || isRegionSelectorOpen}
+          >
+            <img src={ICONS.dashboardActionCapture} alt="" className="dashboard-action-icon" />
+            <strong>{isSavingCapture ? 'Preparing Capture...' : 'New Capture'}</strong>
+            <p>Screenshot and extract facts</p>
+            <img src={ICONS.dashboardActionArrow} alt="" className="dashboard-action-arrow" />
+          </button>
+
+          <button
+            type="button"
+            className="dashboard-action-card"
+            onClick={() => setActiveTab(TAB_KEYS.RECALL)}
+            disabled={isAsking}
+          >
+            <img src={ICONS.dashboardActionRecall} alt="" className="dashboard-action-icon" />
+            <strong>{isTelegramLinked ? 'Ask Telegram' : 'Open Recall'}</strong>
+            <p>{isTelegramLinked ? 'Recall any captured info' : 'Query your saved captures'}</p>
+            <img src={ICONS.dashboardActionArrow} alt="" className="dashboard-action-arrow" />
+          </button>
+        </div>
+
+        <section className="dashboard-recent-section">
+          <div className="dashboard-recent-head">
+            <h2>Recent Captures</h2>
+            <button type="button" onClick={() => setActiveTab(TAB_KEYS.CAPTURES)}>
+              View all
+            </button>
+          </div>
+
+          <div className="dashboard-recent-list">
+            {!dashboardRecentCaptures.length ? (
+              <div className="dashboard-recent-empty">
+                <strong>No captures yet.</strong>
+                <p>Take your first capture to start building your recall timeline.</p>
+              </div>
+            ) : (
+              dashboardRecentCaptures.map((record) => {
+                const tag = extractTag(record)
+                const visual = getDashboardRecentVisual(tag)
+                const factsExtracted = Array.isArray(record?.fields) && record.fields.length ? record.fields.length : 1
+
+                return (
+                  <button
+                    key={`dashboard-${record.id}`}
+                    type="button"
+                    className="dashboard-recent-row"
+                    onClick={() => {
+                      setSelectedCaptureID(record.id)
+                      setActiveTab(TAB_KEYS.CAPTURES)
+                    }}
+                  >
+                    <span className={`dashboard-recent-icon tone-${visual.tone}`}>
+                      <img src={visual.icon} alt="" />
+                    </span>
+                    <span className="dashboard-recent-copy">
+                      <strong>{extractTitle(record)}</strong>
+                      <small>{factsExtracted} facts extracted</small>
+                    </span>
+                    <span className="dashboard-recent-time">{formatRelativeCaptureTime(record.captured_at)}</span>
+                  </button>
+                )
+              })
+            )}
+          </div>
+        </section>
+      </div>
+    )
+  }
+
+  function renderRegionCaptureSelector() {
+    if (!isRegionSelectorOpen) {
+      return null
+    }
+
+    return (
+      <div className="region-picker-overlay" role="dialog" aria-modal="true" aria-label="Select capture region">
+        <div className="region-picker-card">
+          <div className="region-picker-head">
+            <div>
+              <h2>Select region to save</h2>
+              <p>Drag on the screenshot to choose the area for this capture.</p>
+            </div>
+            <button
+              type="button"
+              className="region-picker-cancel"
+              onClick={onCancelRegionCapture}
+              disabled={isSavingCapture}
+            >
+              Cancel
+            </button>
+          </div>
+
+          <div className="region-picker-stage">
+            <div
+              ref={regionSurfaceRef}
+              className={`region-picker-surface ${selectionDragStart ? 'dragging' : ''}`}
+              onPointerDown={onRegionPointerDown}
+              onPointerMove={onRegionPointerMove}
+              onPointerUp={onRegionPointerUp}
+              onPointerCancel={onRegionPointerCancel}
+            >
+              <img
+                src={regionCaptureImage}
+                alt="Screen capture preview for region selection"
+                className="region-picker-image"
+                draggable={false}
+              />
+              {regionSelection ? (
+                <div
+                  className="region-picker-selection"
+                  style={{
+                    left: `${regionSelection.x}px`,
+                    top: `${regionSelection.y}px`,
+                    width: `${regionSelection.width}px`,
+                    height: `${regionSelection.height}px`
+                  }}
+                >
+                  <span>{`${Math.round(regionSelection.width)} x ${Math.round(regionSelection.height)}`}</span>
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="region-picker-actions">
+            <span>{hasValidRegionSelection ? 'Selection ready.' : 'Click and drag to select an area.'}</span>
+            <button
+              type="button"
+              className="primary-gradient region-picker-save"
+              onClick={onConfirmRegionCapture}
+              disabled={!hasValidRegionSelection || isSavingCapture}
+            >
+              {isSavingCapture ? 'Saving...' : 'Save selection'}
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  function renderTelegramIntegrationBanner() {
+    if (isTelegramLinked) {
+      return null
+    }
+
+    const hasCode = Boolean(telegramEventID && telegramLinkStatus !== 'not_linked')
+    const botLink = botUsername ? `https://t.me/${botUsername}` : 'https://t.me'
+
+    return (
+      <section className="telegram-integration-banner">
+        <div className="telegram-integration-copy">
+          <div className="telegram-integration-icon">
+            <img src={ICONS.telegram} alt="" />
+          </div>
+          <div>
+            <small className="telegram-integration-label">Optional integration</small>
+            <h2>Connect Telegram for mobile recall</h2>
+            <p>Get capture summaries and ask SnapRecall questions from Telegram when you are away from desktop.</p>
+          </div>
+        </div>
+
+        <div className="telegram-integration-actions">
+          <button
+            type="button"
+            className="primary-gradient telegram-integration-cta"
+            onClick={onStartTelegramLink}
+            disabled={isStartingTelegramLink || isCheckingTelegramLink}
+          >
+            <span>{isStartingTelegramLink ? 'Generating Event ID...' : 'Connect Telegram'}</span>
+            <img src={ICONS.arrowRight} alt="" />
+          </button>
+          <a className="telegram-integration-open" href={botLink} target="_blank" rel="noreferrer">
+            Open bot
+          </a>
+          <button type="button" className="telegram-integration-settings" onClick={() => setActiveTab(TAB_KEYS.SETTINGS)}>
+            Learn more in Settings
+          </button>
+        </div>
+
+        {hasCode ? (
+          <div className="telegram-integration-code">
+            <code>{telegramEventID}</code>
+            <div className="telegram-integration-code-actions">
+              <button type="button" onClick={onCopyEventID}>
+                Copy code
+              </button>
+              <button type="button" onClick={onCheckTelegramStatus} disabled={isCheckingTelegramLink}>
+                {isCheckingTelegramLink ? 'Checking...' : 'Check link status'}
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </section>
     )
   }
 
   function renderCapturesTab(titleText) {
     return (
       <div className="workspace-content">
+        {renderTelegramIntegrationBanner()}
+
         <div className="captures-header-row">
           <div>
-            <h1>{titleText}</h1>
-            <p>
+            <h1 className="text-reveal text-delay-1">{titleText}</h1>
+            <p className="text-reveal text-delay-2">
               {captureCount} captures · {factsCount} facts extracted
             </p>
           </div>
+          <div className="captures-toolbar-actions">
+            <button
+              type="button"
+              className="primary-gradient capture-main-cta"
+              onClick={beginRegionCapture}
+              disabled={isSavingCapture || isRegionSelectorOpen}
+            >
+              <span>{captureNowLabel}</span>
+            </button>
+            <button
+              type="button"
+              className="danger-ghost capture-delete-inline"
+              onClick={onDeleteSelectedCapture}
+              disabled={!deleteTargetCaptureIDs.length || isDeletingCapture}
+            >
+              {isDeletingCapture
+                ? 'Deleting...'
+                : deleteTargetCaptureIDs.length > 1
+                  ? `Delete selected (${deleteTargetCaptureIDs.length})`
+                  : 'Delete selected'}
+            </button>
+          </div>
+        </div>
+
+        <div className="captures-toolbar-meta">
           <div className="shortcut-inline">
             <kbd>⌘</kbd>
             <span>+</span>
             <kbd>⇧</kbd>
             <span>+</span>
             <kbd>S</kbd>
-            <small>to capture</small>
+            <small>global shortcut</small>
           </div>
+          <small>
+            {selectedCapture ? `Focused: ${selectedCapture.id}` : 'No capture selected'}
+            {selectedCaptureIDs.length ? ` · ${selectedCaptureIDs.length} selected` : ''}
+          </small>
         </div>
 
-        <div className="capture-demo-box">
-          <div className="capture-demo-head">
-            <div>
-              <img src={ICONS.demoCapture} alt="" />
-              <span>Try a Capture</span>
-              <b>Demo</b>
+        <div className="captures-content-grid">
+          <section className="captures-list-panel">
+            <div className="search-row">
+              <label className="search-input">
+                <img src={ICONS.search} alt="" />
+                <input
+                  value={searchTerm}
+                  onChange={(event) => setSearchTerm(event.target.value)}
+                  placeholder="Search title, tag, source, summary..."
+                />
+              </label>
+              <label className="select-all-checkbox">
+                <input
+                  ref={selectAllCheckboxRef}
+                  type="checkbox"
+                  checked={allVisibleCapturesSelected}
+                  onChange={(event) => onToggleSelectAllVisible(event.target.checked)}
+                  disabled={!filteredCaptures.length}
+                />
+                <span>Select all</span>
+              </label>
+              {selectedCaptureIDs.length ? (
+                <button type="button" className="selection-clear" onClick={onClearCaptureSelection}>
+                  Clear ({selectedCaptureIDs.length})
+                </button>
+              ) : null}
             </div>
-            <div className="capture-demo-head-meta">
-              {selectedCapture ? formatCaptureDate(selectedCapture.captured_at) : 'No capture selected'}
-            </div>
-          </div>
+            <div className="history-list">{renderCaptureRows()}</div>
+          </section>
 
-          {renderCaptureDetails()}
-
-          <button
-            type="button"
-            className="primary-gradient capture-cta"
-            onClick={captureAndSave}
-            disabled={isSavingCapture}
-          >
-            <span>{isSavingCapture ? 'Capturing...' : 'Capture This'}</span>
-          </button>
-
-          <button
-            type="button"
-            className="danger-ghost capture-delete-cta"
-            onClick={onDeleteSelectedCapture}
-            disabled={!selectedCapture || isDeletingCapture}
-          >
-            {isDeletingCapture ? 'Deleting...' : 'Delete selected capture'}
-          </button>
+          <section className="captures-detail-panel">{renderCaptureDetails()}</section>
         </div>
-
-        <div className="search-row">
-          <label className="search-input">
-            <img src={ICONS.search} alt="" />
-            <input
-              value={searchTerm}
-              onChange={(event) => setSearchTerm(event.target.value)}
-              placeholder="Search captures, facts, dates..."
-            />
-          </label>
-          <button type="button" className="filter-btn" onClick={() => setStatus('Filter presets coming soon.') }>
-            <img src={ICONS.filter} alt="" />
-            Filter
-          </button>
-        </div>
-
-        <div className="history-list">{renderCaptureRows()}</div>
       </div>
     )
   }
 
   function renderRecallTab() {
+    const hasAnswer = Boolean(queryResult?.answer)
+
     return (
-      <div className="workspace-content recall-view">
-        <h1>Recall</h1>
-        <p>Ask SnapRecall directly in chat style without scrolling through raw captures.</p>
-
-        <form onSubmit={onAsk} className="recall-form">
-          <textarea
-            rows={5}
-            value={question}
-            onChange={(event) => setQuestion(event.target.value)}
-            placeholder="What time is my exam and where is it?"
-          />
-          <button type="submit" className="primary-gradient" disabled={isAsking}>
-            <span>{isAsking ? 'Thinking...' : 'Ask SnapRecall'}</span>
-          </button>
-        </form>
-
-        {queryResult ? (
-          <div className="answer-card">
-            <h2>Answer</h2>
-            <p>{queryResult.answer}</p>
-            {queryResult.source_capture_id ? <small>Source: {queryResult.source_capture_id}</small> : null}
+      <div className="recall-shell">
+        <div className="recall-head">
+          <div className="recall-head-avatar">
+            <img src={ICONS.recallBot} alt="" />
           </div>
-        ) : null}
+          <div className="recall-head-meta">
+            <strong>SnapRecall Bot</strong>
+            <span>online</span>
+          </div>
+        </div>
+
+        <div className="recall-body">
+          {hasAnswer ? (
+            <div className="recall-thread">
+              {lastAskedQuestion ? (
+                <div className="recall-message recall-message-user">
+                  <p>{lastAskedQuestion}</p>
+                </div>
+              ) : null}
+              <div className="recall-message recall-message-bot">
+                <p className="text-echo" key={queryResult.answer}>
+                  {queryResult.answer}
+                </p>
+                {queryResult.source_capture_id ? <small>Source: {queryResult.source_capture_id}</small> : null}
+              </div>
+            </div>
+          ) : (
+            <div className="recall-empty">
+              <div className="recall-empty-icon">
+                <img src={ICONS.recallFocus} alt="" />
+              </div>
+              <p>Ask me anything about your captured screenshots</p>
+              <div className="recall-suggestions">
+                {RECALL_SUGGESTIONS.map((suggestion) => (
+                  <button
+                    key={suggestion}
+                    type="button"
+                    onClick={() => {
+                      void onAskSuggestion(suggestion)
+                    }}
+                    disabled={isAsking}
+                  >
+                    {suggestion}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <form onSubmit={onAsk} className="recall-composer">
+          <div className="recall-composer-row">
+            <input
+              value={question}
+              onChange={(event) => setQuestion(event.target.value)}
+              placeholder="Ask about your screenshots..."
+            />
+            <button type="submit" className="recall-send" aria-label="Send recall query" disabled={isAsking}>
+              <img src={ICONS.recallSend} alt="" />
+            </button>
+          </div>
+        </form>
       </div>
     )
   }
 
   function renderSettingsTab() {
+    const telegramPending = telegramLinkStatus === 'pending'
+    const telegramConnected = isTelegramLinked
+    const telegramLinkLabel = botUsername ? `@${botUsername}` : '@SnapRecallBot'
+
     return (
       <div className="workspace-content settings-view">
-        <h1>Settings</h1>
+        <div className="settings-shell">
+          <div className="settings-head text-reveal text-delay-1">
+            <h1>Settings</h1>
+            <p>Configure your SnapRecall preferences</p>
+          </div>
 
-        <section className="settings-card">
-          <h2>Shortcut</h2>
-          <p>Use your preferred global shortcut for instant capture.</p>
-          <div className="settings-row">
-            <input
-              value={shortcutDraft}
-              onChange={(event) => setShortcutDraft(event.target.value)}
-              placeholder="CommandOrControl+Shift+S"
-            />
-            <button type="button" onClick={onSaveShortcut} disabled={isUpdatingShortcut}>
-              {isUpdatingShortcut ? 'Saving...' : 'Save'}
+          <div className="settings-section-stack">
+            <section className="settings-node-card">
+              <div className="settings-card-title-row">
+                <img src={ICONS.settingsAccount} alt="" />
+                <h3>Account</h3>
+              </div>
+
+              <div className="settings-account-row">
+                <div className="settings-account-identity">
+                  <span className="settings-account-avatar">
+                    <img src={ICONS.settingsAccountAvatar} alt="" />
+                  </span>
+                  <span className="settings-account-meta">
+                    <strong>{displayName}</strong>
+                    <small>{authUser?.email}</small>
+                  </span>
+                </div>
+
+                <button
+                  type="button"
+                  className="settings-outline-btn"
+                  onClick={() => setStatus('Profile editing is not available yet.')}
+                >
+                  Edit Profile
+                </button>
+              </div>
+            </section>
+
+            <section className="settings-node-card">
+              <div className="settings-card-title-row">
+                <img src={ICONS.settingsKeyboard} alt="" />
+                <h3>Keyboard Shortcut</h3>
+              </div>
+
+              <div className="settings-shortcut-row">
+                <p>Capture shortcut</p>
+                <div className="settings-shortcut-kbd-row">
+                  {shortcutTokens.map((token, index) => (
+                    <div key={`shortcut-token-${token}-${index}`} className="settings-shortcut-token-pair">
+                      {index > 0 ? <span className="settings-shortcut-plus">+</span> : null}
+                      <kbd>{token}</kbd>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <form
+                className="settings-shortcut-editor"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void onSaveShortcut()
+                }}
+              >
+                <input
+                  value={shortcutDraft}
+                  onChange={(event) => setShortcutDraft(event.target.value)}
+                  placeholder="CommandOrControl+Shift+S"
+                />
+                <button type="submit" disabled={isUpdatingShortcut}>
+                  {isUpdatingShortcut ? 'Saving...' : 'Save'}
+                </button>
+              </form>
+            </section>
+
+            <section className="settings-node-card settings-telegram-card">
+              <div className="settings-card-title-row">
+                <img src={ICONS.settingsTelegram} alt="" />
+                <h3>Telegram Integration</h3>
+              </div>
+
+              <div className="settings-telegram-status-row">
+                <div className="settings-row-meta">
+                  <strong>{telegramConnected ? 'Bot connected' : 'Bot not connected'}</strong>
+                  <small>
+                    {telegramConnected
+                      ? `${telegramLinkLabel} · Linked to @${displayName.replace(/\s+/g, '_').toLowerCase()} for mobile updates`
+                      : `Optional: connect ${telegramLinkLabel} to sync captures and ask questions from Telegram`}
+                  </small>
+                </div>
+
+                {telegramConnected ? (
+                  <div className="settings-connected-chip">
+                    <img src={ICONS.settingsConnectedCheck} alt="" />
+                    <span>Connected</span>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    className="settings-outline-btn settings-connect-btn"
+                    onClick={onStartTelegramLink}
+                    disabled={isStartingTelegramLink || isCheckingTelegramLink}
+                  >
+                    {isStartingTelegramLink ? 'Generating...' : 'Connect'}
+                  </button>
+                )}
+              </div>
+
+              <div className="settings-toggle-row">
+                <span>Auto-sync captures</span>
+                <button
+                  type="button"
+                  className={`settings-toggle ${autoSyncCaptures ? 'on' : ''}`}
+                  onClick={() => setAutoSyncCaptures((prev) => !prev)}
+                  aria-pressed={autoSyncCaptures}
+                  disabled={!telegramConnected}
+                >
+                  <span />
+                </button>
+              </div>
+
+              <div className="settings-toggle-row two-line">
+                <span className="settings-row-meta">
+                  <strong>{`Q&A mode`}</strong>
+                  <small>Ask natural language questions in Telegram</small>
+                </span>
+                <button
+                  type="button"
+                  className={`settings-toggle ${telegramQAMode ? 'on' : ''}`}
+                  onClick={() => setTelegramQAMode((prev) => !prev)}
+                  aria-pressed={telegramQAMode}
+                  disabled={!telegramConnected}
+                >
+                  <span />
+                </button>
+              </div>
+
+              {telegramPending ? (
+                <div className="settings-event-row">
+                  <code>{telegramEventID}</code>
+                  <button type="button" onClick={onCopyEventID}>
+                    Copy
+                  </button>
+                  <button type="button" onClick={onCheckTelegramStatus} disabled={isCheckingTelegramLink}>
+                    {isCheckingTelegramLink ? 'Checking...' : 'Check'}
+                  </button>
+                </div>
+              ) : null}
+
+              <div className="settings-card-divider">
+                <button
+                  type="button"
+                  className="settings-danger-link"
+                  disabled={!telegramConnected}
+                  onClick={() => setStatus('Disconnect Telegram is not available yet.')}
+                >
+                  <img src={ICONS.settingsDisconnect} alt="" />
+                  <span>Disconnect Telegram</span>
+                </button>
+              </div>
+            </section>
+
+            <section className="settings-node-card">
+              <div className="settings-card-title-row">
+                <img src={ICONS.settingsPrivacy} alt="" />
+                <h3>{`Privacy & Processing`}</h3>
+              </div>
+
+              <div className="settings-toggle-row two-line">
+                <span className="settings-row-meta">
+                  <strong>Auto-capture on shortcut</strong>
+                  <small>Skip region selection, capture full screen</small>
+                </span>
+                <button
+                  type="button"
+                  className={`settings-toggle ${autoCaptureOnShortcut ? 'on' : ''}`}
+                  onClick={() => setAutoCaptureOnShortcut((prev) => !prev)}
+                  aria-pressed={autoCaptureOnShortcut}
+                >
+                  <span />
+                </button>
+              </div>
+            </section>
+
+            <section className="settings-node-card">
+              <div className="settings-card-title-row">
+                <img src={ICONS.settingsNotifications} alt="" />
+                <h3>Notifications</h3>
+              </div>
+
+              <div className="settings-toggle-row">
+                <span>Show capture confirmation</span>
+                <button
+                  type="button"
+                  className={`settings-toggle ${showCaptureConfirmation ? 'on' : ''}`}
+                  onClick={() => setShowCaptureConfirmation((prev) => !prev)}
+                  aria-pressed={showCaptureConfirmation}
+                >
+                  <span />
+                </button>
+              </div>
+            </section>
+
+            <section className="settings-node-card settings-storage-card">
+              <div className="settings-card-title-row">
+                <img src={ICONS.settingsStorage} alt="" />
+                <h3>Storage</h3>
+              </div>
+
+              <div className="settings-storage-row">
+                <span>Local storage used</span>
+                <strong>{localStorageMB.toFixed(1)} MB</strong>
+              </div>
+
+              <div className="settings-storage-track">
+                <span className="settings-storage-fill" style={{ width: `${storageFill}%` }} />
+              </div>
+              <small>
+                {localStorageMB.toFixed(1)} MB of {STORAGE_LIMIT_MB} MB used
+              </small>
+            </section>
+
+            <section className="settings-node-card">
+              <div className="settings-card-title-row">
+                <img src={ICONS.settingsAbout} alt="" />
+                <h3>About</h3>
+              </div>
+
+              <div className="settings-about-grid">
+                <div className="settings-about-row">
+                  <span>Version</span>
+                  <strong>{APP_VERSION}</strong>
+                </div>
+                <div className="settings-about-row">
+                  <span>Platform</span>
+                  <strong>{platformLabel}</strong>
+                </div>
+                <div className="settings-about-row">
+                  <span>License</span>
+                  <button
+                    type="button"
+                    className="settings-link-inline"
+                    onClick={() => setStatus('License details are not available in-app yet.')}
+                  >
+                    <span>View</span>
+                    <img src={ICONS.settingsExternalLink} alt="" />
+                  </button>
+                </div>
+              </div>
+            </section>
+
+            <button type="button" className="settings-logout-link" onClick={onLogout}>
+              Log Out
             </button>
           </div>
-          <small>Current shortcut: {shortcut}</small>
-        </section>
-
-        <section className="settings-card">
-          <h2>Telegram</h2>
-          <p>Status: {isTelegramLinked ? 'Connected' : 'Not connected'}</p>
-
-          {!isTelegramLinked ? (
-            <button
-              type="button"
-              onClick={onStartTelegramLink}
-              disabled={isStartingTelegramLink || isCheckingTelegramLink}
-            >
-              {isStartingTelegramLink ? 'Generating Event ID...' : 'Connect Telegram'}
-            </button>
-          ) : null}
-
-          {telegramEventID && !isTelegramLinked ? (
-            <div className="event-id-inline">
-              <code>{telegramEventID}</code>
-              <button type="button" onClick={onCopyEventID}>
-                Copy
-              </button>
-            </div>
-          ) : null}
-        </section>
-
-        <section className="settings-card">
-          <h2>Backend</h2>
-          <p>{backendURL}</p>
-        </section>
-
-        <button type="button" className="logout-btn" onClick={onLogout}>
-          Log Out
-        </button>
+        </div>
       </div>
     )
+  }
+
+  function renderWorkspacePanel() {
+    if (displayTab === TAB_KEYS.RECALL) {
+      return renderRecallTab()
+    }
+    if (displayTab === TAB_KEYS.SETTINGS) {
+      return renderSettingsTab()
+    }
+    if (displayTab === TAB_KEYS.DASHBOARD) {
+      return renderDashboardTab()
+    }
+    return renderCapturesTab('Captures')
   }
 
   function renderWorkspaceShell() {
@@ -1367,6 +2584,14 @@ function App() {
       { key: TAB_KEYS.RECALL, label: 'Recall', icon: ICONS.navRecall },
       { key: TAB_KEYS.SETTINGS, label: 'Settings', icon: ICONS.navSettings }
     ]
+    const hideStatusByDefault = displayTab === TAB_KEYS.RECALL || displayTab === TAB_KEYS.DASHBOARD
+    const isCaptureConfirmationStatus = status === CAPTURE_SUCCESS_STATUS
+    const showStatusBar =
+      !hideStatusByDefault ||
+      isAsking ||
+      statusTone === 'danger' ||
+      statusTone === 'info' ||
+      (showCaptureConfirmation && isCaptureConfirmationStatus)
 
     return (
       <div className="screen-frame">
@@ -1395,8 +2620,13 @@ function App() {
                 <span>+</span>
                 <kbd>{shortcut.endsWith('S') ? 'S' : 'Key'}</kbd>
               </div>
-              <button type="button" className="quick-capture-action" onClick={captureAndSave} disabled={isSavingCapture}>
-                {isSavingCapture ? 'Capturing...' : 'Capture now'}
+              <button
+                type="button"
+                className="quick-capture-action"
+                onClick={beginRegionCapture}
+                disabled={isSavingCapture || isRegionSelectorOpen}
+              >
+                {captureNowLabel}
               </button>
             </div>
 
@@ -1419,19 +2649,31 @@ function App() {
               })}
             </nav>
 
-            <div className="telegram-footer">
-              <span className={`dot ${isTelegramLinked ? 'on' : 'off'}`} />
-              <span>{isTelegramLinked ? 'Telegram connected' : 'Telegram not connected'}</span>
-            </div>
+            <button
+              type="button"
+              className={`telegram-footer ${isTelegramLinked ? 'is-linked' : 'is-unlinked'}`}
+              onClick={() => setActiveTab(TAB_KEYS.SETTINGS)}
+            >
+              <span className="telegram-footer-status">
+                <span className={`dot ${isTelegramLinked ? 'on' : 'off'}`} />
+                <span>{isTelegramLinked ? 'Telegram connected' : 'Telegram optional integration'}</span>
+              </span>
+              <small>
+                {isTelegramLinked ? 'Manage settings' : 'Get mobile summaries and recall chat in Settings'}
+              </small>
+            </button>
           </aside>
 
           <section className="workspace-main">
-            <div className={`top-status tone-${statusTone}`}>{status}</div>
+            {showStatusBar ? (
+              <div className={`top-status tone-${statusTone}`}>
+                <span className="status-copy" key={status}>
+                  {status}
+                </span>
+              </div>
+            ) : null}
 
-            {activeTab === TAB_KEYS.RECALL ? renderRecallTab() : null}
-            {activeTab === TAB_KEYS.SETTINGS ? renderSettingsTab() : null}
-            {activeTab === TAB_KEYS.DASHBOARD ? renderCapturesTab('Dashboard') : null}
-            {activeTab === TAB_KEYS.CAPTURES ? renderCapturesTab('Captures') : null}
+            <div className={`workspace-panel tab-${tabStage}`}>{renderWorkspacePanel()}</div>
 
             <footer className="workspace-footbar">
               <div>
@@ -1442,26 +2684,34 @@ function App() {
                 </span>
               </div>
               <div>
-                <span>Local: {Math.max(3, Math.round((captureCount * 0.6 + factsCount * 0.1) * 10) / 10)} MB</span>
+                <span>Local: {localStorageMB.toFixed(1)} MB</span>
                 <span className="sep">|</span>
-                <span>v1.0.0</span>
+                <span>v{APP_VERSION}</span>
               </div>
             </footer>
           </section>
         </div>
+        {renderRegionCaptureSelector()}
       </div>
     )
   }
 
-  if (!authUser) {
-    return renderLoginScreen()
+  function renderActiveScreen() {
+    if (displayScreen === 'loading') {
+      return renderLoadingScreen()
+    }
+    if (displayScreen === 'login') {
+      return renderLoginScreen()
+    }
+    return renderWorkspaceShell()
   }
 
-  if (requiresTelegramSetup) {
-    return renderTelegramSetup()
-  }
-
-  return renderWorkspaceShell()
+  return (
+    <div className={`screen-transition-layer stage-${screenStage}`}>
+      {renderActiveScreen()}
+      {renderGlobalLoader()}
+    </div>
+  )
 }
 
 export default App

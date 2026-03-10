@@ -18,6 +18,12 @@ const defaultCaptureShortcut = process.env.CAPTURE_SHORTCUT || 'CommandOrControl
 let mainWindow = null
 let captureShortcut = defaultCaptureShortcut
 
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
 function getSettingsPath() {
   return path.join(app.getPath('userData'), 'snaprecall-settings.json')
 }
@@ -62,27 +68,11 @@ function saveAppSettings() {
   }
 }
 
-function focusMainWindow() {
-  if (!mainWindow) {
-    return
-  }
-
-  if (mainWindow.isMinimized()) {
-    mainWindow.restore()
-  }
-  if (!mainWindow.isVisible()) {
-    mainWindow.show()
-  }
-
-  mainWindow.focus()
-}
-
 function triggerCapture(shortcutValue) {
   if (!mainWindow) {
     return
   }
 
-  focusMainWindow()
   mainWindow.webContents.send('shortcut:capture', { shortcut: shortcutValue })
 }
 
@@ -165,26 +155,45 @@ function createWindow() {
   }
 }
 
-async function capturePrimaryDisplay() {
+async function capturePrimaryDisplay(options = {}) {
+  const shouldHideWindow =
+    Boolean(options.hideWindow) &&
+    Boolean(mainWindow) &&
+    !mainWindow.isDestroyed() &&
+    mainWindow.isVisible()
+
+  if (shouldHideWindow && mainWindow) {
+    mainWindow.hide()
+    await sleep(160)
+  }
+
   const primaryDisplay = screen.getPrimaryDisplay()
   const width = Math.floor(primaryDisplay.size.width)
   const height = Math.floor(primaryDisplay.size.height)
 
-  const sources = await desktopCapturer.getSources({
-    types: ['screen'],
-    thumbnailSize: { width, height }
-  })
+  try {
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width, height }
+    })
 
-  const byPrimary = sources.find(
-    (source) => String(source.display_id) === String(primaryDisplay.id)
-  )
-  const target = byPrimary || sources[0]
+    const byPrimary = sources.find(
+      (source) => String(source.display_id) === String(primaryDisplay.id)
+    )
+    const target = byPrimary || sources[0]
 
-  if (!target) {
-    throw new Error('No display source found for capture')
+    if (!target) {
+      throw new Error('No display source found for capture')
+    }
+
+    return target.thumbnail.toDataURL()
+  } finally {
+    if (shouldHideWindow && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show()
+      mainWindow.focus()
+      await sleep(80)
+    }
   }
-
-  return target.thumbnail.toDataURL()
 }
 
 app.whenReady().then(() => {
@@ -196,6 +205,10 @@ app.whenReady().then(() => {
 
   ipcMain.handle('capture-screen', async () => {
     return capturePrimaryDisplay()
+  })
+
+  ipcMain.handle('capture-screen-selection', async () => {
+    return capturePrimaryDisplay({ hideWindow: true })
   })
 
   ipcMain.handle('app:get-info', async () => {

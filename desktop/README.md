@@ -45,4 +45,5 @@ npm run dist:win
 
 ## Notes
 - Screen capture uses Electron `desktopCapturer` and may require OS screen recording permission.
-- Current capture is full-screen primary display.
+- `Capture now` in the UI opens a region selector and saves only the selected area.
+- Global shortcut capture keeps quick full-screen primary display capture.

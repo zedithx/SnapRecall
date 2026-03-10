@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('electronAPI', {
   captureScreen: () => ipcRenderer.invoke('capture-screen'),
+  captureScreenForSelection: () => ipcRenderer.invoke('capture-screen-selection'),
   getAppInfo: () => ipcRenderer.invoke('app:get-info'),
   updateCaptureShortcut: (shortcut) =>
     ipcRenderer.invoke('shortcut:update', shortcut),
