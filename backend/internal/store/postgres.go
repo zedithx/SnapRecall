@@ -28,6 +28,10 @@ import (
 const (
 	defaultStoreTimeout     = 10 * time.Second
 	defaultSlowSQLThreshold = 300 * time.Millisecond
+	defaultMaxOpenConns     = 10
+	defaultMaxIdleConns     = 5
+	defaultConnMaxLife      = 30 * time.Minute
+	maxWarmConnections      = 5
 
 	captureSelectColumns       = "id,user_id,captured_at,source_app,source_title,ocr_text,summary,tag,fields_json"
 	recentCaptureSelectColumns = "id,user_id,captured_at,source_app,source_title,summary,tag,fields_json"
@@ -146,12 +150,17 @@ func NewPostgresStore(
 		return nil, err
 	}
 
+	maxOpenConns, maxIdleConns, connMaxLife = normalizePoolSettings(maxOpenConns, maxIdleConns, connMaxLife)
+
 	gdb, err := gorm.Open(
 		gormpostgres.New(gormpostgres.Config{
 			DSN:                  dsn,
 			PreferSimpleProtocol: true,
 		}),
 		&gorm.Config{
+			// Each write operation does not need an implicit BEGIN/COMMIT wrapper here.
+			// Disabling it removes two round-trips per INSERT/DELETE on remote Postgres.
+			SkipDefaultTransaction: true,
 			Logger: gormlogger.New(log.New(os.Stdout, "\r\n", log.LstdFlags), gormlogger.Config{
 				SlowThreshold:             defaultSlowSQLThreshold,
 				LogLevel:                  gormlogger.Warn,
@@ -172,11 +181,17 @@ func NewPostgresStore(
 	sqlDB.SetMaxOpenConns(maxOpenConns)
 	sqlDB.SetMaxIdleConns(maxIdleConns)
 	sqlDB.SetConnMaxLifetime(connMaxLife)
+	sqlDB.SetConnMaxIdleTime(minDuration(10*time.Minute, connMaxLife))
 
 	if err := sqlDB.PingContext(ctx); err != nil {
 		_ = sqlDB.Close()
 		return nil, err
 	}
+
+	// Warm idle connections so the first few user requests avoid TLS/login handshake spikes.
+	warmCtx, warmCancel := context.WithTimeout(ctx, 5*time.Second)
+	warmConnectionPool(warmCtx, sqlDB, maxIdleConns)
+	warmCancel()
 
 	return &PostgresStore{db: gdb}, nil
 }
@@ -224,6 +239,63 @@ func runMigrations(dsn string) error {
 	}
 
 	return nil
+}
+
+func normalizePoolSettings(maxOpenConns, maxIdleConns int, connMaxLife time.Duration) (int, int, time.Duration) {
+	if maxOpenConns <= 0 {
+		maxOpenConns = defaultMaxOpenConns
+	}
+	if maxIdleConns <= 0 {
+		maxIdleConns = defaultMaxIdleConns
+	}
+	if maxIdleConns > maxOpenConns {
+		maxIdleConns = maxOpenConns
+	}
+	if connMaxLife <= 0 {
+		connMaxLife = defaultConnMaxLife
+	}
+	return maxOpenConns, maxIdleConns, connMaxLife
+}
+
+func warmConnectionPool(ctx context.Context, db *sql.DB, target int) {
+	if target > maxWarmConnections {
+		target = maxWarmConnections
+	}
+	if target <= 1 {
+		return
+	}
+
+	conns := make([]*sql.Conn, 0, target-1)
+	defer func() {
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
+	}()
+
+	for i := 0; i < target-1; i++ {
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			return
+		}
+		if err := conn.PingContext(ctx); err != nil {
+			_ = conn.Close()
+			return
+		}
+		conns = append(conns, conn)
+	}
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a <= 0 {
+		return b
+	}
+	if b <= 0 {
+		return a
+	}
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (s *PostgresStore) SaveCapture(record model.CaptureRecord) error {

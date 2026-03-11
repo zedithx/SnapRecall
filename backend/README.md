@@ -14,6 +14,7 @@ cp .env.example .env
 
 Fill in:
 - `OPENAI_API_KEY`
+- `AI_REQUEST_TIMEOUT_SECONDS` (optional, default `60`; increase if large screenshots time out)
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_API_BASE_URL` (optional, defaults to Telegram official API)
 - `TELEGRAM_DEFAULT_CHAT_ID` (optional fallback)

@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -191,6 +193,13 @@ func (c *OpenAIClient) chatJSON(ctx context.Context, system string, user any, ou
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("openai request timed out: %w", err)
+		}
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return fmt.Errorf("openai request timed out: %w", err)
+		}
 		return err
 	}
 	defer resp.Body.Close()

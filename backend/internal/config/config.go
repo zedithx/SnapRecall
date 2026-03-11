@@ -13,6 +13,7 @@ type Config struct {
 	AppEnv                string
 	Port                  string
 	RequestTimeout        time.Duration
+	AIRequestTimeout      time.Duration
 	DataDir               string
 	PostgresDSN           string
 	PostgresMaxOpenConns  int
@@ -36,6 +37,7 @@ func Load() (*Config, error) {
 		AppEnv:                getOrDefault("APP_ENV", "development"),
 		Port:                  getOrDefault("APP_PORT", "8080"),
 		RequestTimeout:        time.Duration(getIntOrDefault("REQUEST_TIMEOUT_SECONDS", 20)) * time.Second,
+		AIRequestTimeout:      time.Duration(getIntOrDefault("AI_REQUEST_TIMEOUT_SECONDS", 60)) * time.Second,
 		DataDir:               getOrDefault("DATA_DIR", "./data"),
 		PostgresDSN:           getFirstEnv("POSTGRES_DSN", "DATABASE_URL"),
 		PostgresMaxOpenConns:  getIntOrDefault("POSTGRES_MAX_OPEN_CONNS", 10),

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -31,7 +32,7 @@ func main() {
 		defer cleanupStore()
 	}
 
-	aiClient := ai.NewOpenAIClient(cfg.OpenAIAPIKey, cfg.OpenAIModel, cfg.OpenAIBaseURL, cfg.RequestTimeout)
+	aiClient := ai.NewOpenAIClient(cfg.OpenAIAPIKey, cfg.OpenAIModel, cfg.OpenAIBaseURL, cfg.AIRequestTimeout)
 	tgClient := telegram.NewClient(cfg.TelegramBotToken, cfg.TelegramAPIBaseURL, cfg.RequestTimeout)
 	svc := service.New(aiClient, captureStore, tgClient, cfg.TelegramDefaultChatID)
 	authManager, err := auth.NewManager(cfg.AuthJWTSecret, cfg.AuthTokenTTL)
@@ -168,11 +169,15 @@ func main() {
 		}
 		in.UserID = claims.UserID
 
-		ctx, cancel := context.WithTimeout(r.Context(), cfg.RequestTimeout)
+		ctx, cancel := context.WithTimeout(r.Context(), cfg.AIRequestTimeout)
 		defer cancel()
 
 		record, warning, err := svc.ProcessCapture(ctx, in)
 		if err != nil {
+			if isTimeoutError(err) {
+				writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "capture analysis timed out; retry or increase AI_REQUEST_TIMEOUT_SECONDS"})
+				return
+			}
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
@@ -277,11 +282,15 @@ func main() {
 		}
 		in.UserID = claims.UserID
 
-		ctx, cancel := context.WithTimeout(r.Context(), cfg.RequestTimeout)
+		ctx, cancel := context.WithTimeout(r.Context(), cfg.AIRequestTimeout)
 		defer cancel()
 
 		answer, err := svc.AnswerQuestion(ctx, in)
 		if err != nil {
+			if isTimeoutError(err) {
+				writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "query timed out; retry or increase AI_REQUEST_TIMEOUT_SECONDS"})
+				return
+			}
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
@@ -392,11 +401,12 @@ func main() {
 	})
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
+	writeTimeout := maxDuration(cfg.RequestTimeout, cfg.AIRequestTimeout) + 10*time.Second
 	server := &http.Server{
 		Addr:         addr,
 		Handler:      withCORS(mux),
 		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		WriteTimeout: writeTimeout,
 		IdleTimeout:  60 * time.Second,
 	}
 
@@ -550,4 +560,20 @@ func extractBearerToken(raw string) string {
 		return strings.TrimSpace(value[len(prefix):])
 	}
 	return ""
+}
+
+func isTimeoutError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func maxDuration(a, b time.Duration) time.Duration {
+	if a >= b {
+		return a
+	}
+	return b
 }

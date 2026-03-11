@@ -32,6 +32,8 @@ const ICONS = {
   // Telegram setup
   telegram: 'https://www.figma.com/api/mcp/asset/a90331e3-3336-436d-a63a-27fcf225e403',
   telegramLink: 'https://www.figma.com/api/mcp/asset/10641bb6-110f-40db-a486-f186b5fdf040',
+  telegramNotice: 'https://www.figma.com/api/mcp/asset/166dab0c-10cc-4c7e-9c3d-40e1368ffdf2',
+  telegramNoticeLink: 'https://www.figma.com/api/mcp/asset/90ffe303-216c-4569-8cd9-6c1da96f3065',
   telegramOpen: 'https://www.figma.com/api/mcp/asset/4c512f3d-bfe4-4680-a5c3-1e245ba9076d',
   copy: 'https://www.figma.com/api/mcp/asset/ddbbfba4-895e-49e9-9719-cab5a3758516',
   check: 'https://www.figma.com/api/mcp/asset/edc04d6b-6be1-432b-baa5-1b2d48d5b14c',
@@ -2278,39 +2280,39 @@ function App() {
 
     return (
       <section className="telegram-integration-banner">
-        <div className="telegram-integration-copy">
+        <div className="telegram-integration-note">
           <div className="telegram-integration-icon">
-            <img src={ICONS.telegram} alt="" />
+            <img src={ICONS.telegramNotice} alt="" />
           </div>
-          <div>
-            <small className="telegram-integration-label">Optional integration</small>
-            <h2>Connect Telegram for mobile recall</h2>
-            <p>Get capture summaries and ask SnapRecall questions from Telegram when you are away from desktop.</p>
+          <div className="telegram-integration-copy">
+            <h2>Unlock Instant Recall via Telegram</h2>
+            <p>
+              Connect your Telegram to ask natural language questions like &quot;When is my exam?&quot; or
+              &quot;What&apos;s my flight number?&quot; and get instant answers from your captured screenshots,
+              anywhere.
+            </p>
+            <div className="telegram-integration-actions">
+              <button
+                type="button"
+                className="telegram-integration-cta"
+                onClick={onStartTelegramLink}
+                disabled={isStartingTelegramLink || isCheckingTelegramLink || isDisconnectingTelegram}
+              >
+                <img src={ICONS.telegramNoticeLink} alt="" />
+                <span>{isStartingTelegramLink ? 'Generating Event ID...' : 'Connect Telegram'}</span>
+              </button>
+              <span className="telegram-integration-meta">Takes ~30 seconds</span>
+            </div>
           </div>
-        </div>
-
-        <div className="telegram-integration-actions">
-          <button
-            type="button"
-            className="primary-gradient telegram-integration-cta"
-            onClick={onStartTelegramLink}
-            disabled={isStartingTelegramLink || isCheckingTelegramLink || isDisconnectingTelegram}
-          >
-            <span>{isStartingTelegramLink ? 'Generating Event ID...' : 'Connect Telegram'}</span>
-            <img src={ICONS.arrowRight} alt="" />
-          </button>
-          <a className="telegram-integration-open" href={botLink} target="_blank" rel="noreferrer">
-            Open bot
-          </a>
-          <button type="button" className="telegram-integration-settings" onClick={() => setActiveTab(TAB_KEYS.SETTINGS)}>
-            Learn more in Settings
-          </button>
         </div>
 
         {hasCode ? (
           <div className="telegram-integration-code">
             <code>{telegramEventID}</code>
             <div className="telegram-integration-code-actions">
+              <a className="telegram-integration-open" href={botLink} target="_blank" rel="noreferrer">
+                Open bot
+              </a>
               <button type="button" onClick={onCopyEventID}>
                 Copy code
               </button>

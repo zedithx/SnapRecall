@@ -135,3 +135,14 @@ Use this file to record each bug in a consistent format.
 - **Status:** Resolved
 - **Owner:** Codex
 - **Notes:** Disconnect removes user chat linkage; users can immediately generate a fresh event ID to relink.
+
+## Bug 012
+- **Date:** 2026-03-11
+- **Bug/Error:** Capture requests failed with `Post "https://api.openai.com/v1/chat/completions": context deadline exceeded`.
+- **Impact:** `Capture and Save` could fail intermittently or consistently for larger screenshots/slow API responses.
+- **Reproduction Steps:** Use backend default `REQUEST_TIMEOUT_SECONDS=20`, submit an image-based capture, and observe timeout error in API response/logs.
+- **Root Cause:** OpenAI client timeout and request context timeout were both tied to generic `REQUEST_TIMEOUT_SECONDS`; 20 seconds was too aggressive for some model calls.
+- **Resolution Method:** Added dedicated `AI_REQUEST_TIMEOUT_SECONDS` (default 60s), used it for OpenAI client and AI-heavy endpoints (`/v1/captures`, `/v1/query`), and improved timeout errors/status (`504` with actionable message).
+- **Status:** Resolved
+- **Owner:** Codex
+- **Notes:** If needed, increase `AI_REQUEST_TIMEOUT_SECONDS` in `.env` for slower networks or larger image payloads.
