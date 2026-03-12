@@ -20,6 +20,7 @@ Fill in:
 - `TELEGRAM_DEFAULT_CHAT_ID` (optional fallback)
 - `POSTGRES_DSN` or `DATABASE_URL` (required for persistent storage)
 - `AUTH_JWT_SECRET` (required for login/session token signing)
+- `ALLOWED_ORIGINS` (optional, comma-separated; defaults to local dev + packaged Electron `null` origin)
 
 Supabase DSN format example:
 `postgresql://postgres.<project-ref>:<password>@aws-1-ap-south-1.pooler.supabase.com:5432/postgres?sslmode=require`
@@ -46,7 +47,7 @@ cd backend
 
 ## 3) Telegram link flow
 1. Desktop calls `POST /v1/integrations/telegram/start` with auth token.
-2. Backend returns `event_id` (example: `EVT-12AB34`).
+2. Backend returns `event_id` (example: `EVT-JBSWY3DPEHPK3PXPJBSWY3DPFM`).
 3. User starts Telegram bot and sends that `event_id` message.
 4. Backend polling worker claims link and maps `user_id` -> `chat_id`.
 5. Desktop polls `GET /v1/integrations/telegram/status?event_id=...` until status is `linked`.
@@ -107,7 +108,7 @@ curl -X POST http://localhost:8080/v1/integrations/telegram/start \
 
 Check Telegram link status:
 ```bash
-curl "http://localhost:8080/v1/integrations/telegram/status?event_id=EVT-12AB34" \
+curl "http://localhost:8080/v1/integrations/telegram/status?event_id=EVT-JBSWY3DPEHPK3PXPJBSWY3DPFM" \
   -H "Authorization: Bearer $TOKEN"
 ```
 

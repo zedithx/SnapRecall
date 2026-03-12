@@ -7,6 +7,7 @@ const {
   dialog,
   globalShortcut,
   ipcMain,
+  safeStorage,
   screen
 } = require('electron')
 
@@ -31,6 +32,10 @@ function getSettingsPath() {
 
 function getLogFilePath() {
   return path.join(app.getPath('userData'), 'logs', 'desktop.log')
+}
+
+function getAuthSessionPath() {
+  return path.join(app.getPath('userData'), 'snaprecall-auth.json')
 }
 
 function sanitizeLogValue(value, depth = 0) {
@@ -164,6 +169,127 @@ function saveAppSettings() {
     logEvent('info', 'settings_saved', { captureShortcut })
   } catch (err) {
     logEvent('error', 'settings_save_failed', { error: err })
+  }
+}
+
+function isValidAuthUser(user) {
+  return Boolean(
+    user &&
+      typeof user === 'object' &&
+      typeof user.user_id === 'string' &&
+      user.user_id.trim() &&
+      typeof user.email === 'string' &&
+      user.email.trim()
+  )
+}
+
+function encodeSecret(value) {
+  const text = String(value || '')
+  if (!text) {
+    return {
+      encrypted: false,
+      value: ''
+    }
+  }
+
+  try {
+    if (safeStorage.isEncryptionAvailable()) {
+      return {
+        encrypted: true,
+        value: safeStorage.encryptString(text).toString('base64')
+      }
+    }
+  } catch (err) {
+    logEvent('warn', 'secure_storage_encrypt_unavailable', { error: err })
+  }
+
+  return {
+    encrypted: false,
+    value: Buffer.from(text, 'utf8').toString('base64')
+  }
+}
+
+function decodeSecret(record) {
+  if (!record || typeof record.value !== 'string' || !record.value.trim()) {
+    return ''
+  }
+
+  const payload = Buffer.from(record.value, 'base64')
+  if (!record.encrypted) {
+    return payload.toString('utf8')
+  }
+  if (!safeStorage.isEncryptionAvailable()) {
+    return ''
+  }
+  return safeStorage.decryptString(payload)
+}
+
+function loadAuthSession() {
+  try {
+    const raw = fs.readFileSync(getAuthSessionPath(), 'utf8')
+    const parsed = JSON.parse(raw)
+    const token = decodeSecret(parsed?.token)
+    const user = isValidAuthUser(parsed?.user) ? parsed.user : null
+
+    if (!token || !user) {
+      return null
+    }
+
+    logEvent('info', 'auth_session_loaded', { user_id: user.user_id })
+    return {
+      token,
+      user
+    }
+  } catch (err) {
+    if (err?.code !== 'ENOENT') {
+      logEvent('warn', 'auth_session_load_failed', { error: err })
+    }
+    return null
+  }
+}
+
+function saveAuthSession(token, user) {
+  if (!token || !isValidAuthUser(user)) {
+    clearAuthSession()
+    return
+  }
+
+  const sessionPath = getAuthSessionPath()
+
+  try {
+    fs.mkdirSync(path.dirname(sessionPath), { recursive: true })
+    fs.writeFileSync(
+      sessionPath,
+      JSON.stringify(
+        {
+          token: encodeSecret(token),
+          user,
+          savedAt: new Date().toISOString()
+        },
+        null,
+        2
+      ),
+      'utf8'
+    )
+    logEvent('info', 'auth_session_saved', { user_id: user.user_id })
+  } catch (err) {
+    logEvent('error', 'auth_session_save_failed', { error: err })
+    throw err
+  }
+}
+
+function clearAuthSession() {
+  const sessionPath = getAuthSessionPath()
+
+  try {
+    if (!fs.existsSync(sessionPath)) {
+      return
+    }
+    fs.unlinkSync(sessionPath)
+    logEvent('info', 'auth_session_cleared')
+  } catch (err) {
+    logEvent('error', 'auth_session_clear_failed', { error: err })
+    throw err
   }
 }
 
@@ -385,6 +511,20 @@ app.whenReady().then(() => {
     return {
       captureShortcut
     }
+  })
+
+  ipcMain.handle('auth-session:get', async () => {
+    return loadAuthSession()
+  })
+
+  ipcMain.handle('auth-session:set', async (_event, session) => {
+    saveAuthSession(session?.token, session?.user)
+    return { ok: true }
+  })
+
+  ipcMain.handle('auth-session:clear', async () => {
+    clearAuthSession()
+    return { ok: true }
   })
 
   ipcMain.handle('shortcut:update', async (_event, nextShortcut) => {

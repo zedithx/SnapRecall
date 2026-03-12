@@ -173,7 +173,7 @@ function cropCapturedArea(dataUrl, selection, renderedSize) {
 }
 
 function loadStoredAuthUser() {
-  const raw = window.localStorage.getItem(AUTH_USER_KEY)
+  const raw = window.sessionStorage.getItem(AUTH_USER_KEY)
   if (!raw) {
     return null
   }
@@ -194,16 +194,6 @@ function loadStoredAuthUser() {
   }
 
   return null
-}
-
-function saveAuthSession(token, user) {
-  window.localStorage.setItem(AUTH_TOKEN_KEY, token)
-  window.localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user))
-}
-
-function clearAuthSession() {
-  window.localStorage.removeItem(AUTH_TOKEN_KEY)
-  window.localStorage.removeItem(AUTH_USER_KEY)
 }
 
 function formatFetchError(err, backendURL) {
@@ -274,6 +264,54 @@ async function fetchJSONWithLogging(url, options = {}, event, meta = {}) {
     })
     throw err
   }
+}
+
+function supportsSecureDesktopSession() {
+  return typeof window !== 'undefined' && Boolean(window.electronAPI?.getAuthSession)
+}
+
+function loadFallbackAuthSession() {
+  if (typeof window === 'undefined') {
+    return null
+  }
+
+  const token = window.sessionStorage.getItem(AUTH_TOKEN_KEY) || ''
+  const user = loadStoredAuthUser()
+  if (!token || !user) {
+    return null
+  }
+
+  return {
+    token,
+    user
+  }
+}
+
+async function loadPersistedAuthSession() {
+  if (supportsSecureDesktopSession()) {
+    return window.electronAPI.getAuthSession()
+  }
+  return loadFallbackAuthSession()
+}
+
+async function persistAuthSession(token, user) {
+  if (supportsSecureDesktopSession()) {
+    await window.electronAPI.setAuthSession({ token, user })
+    return
+  }
+
+  window.sessionStorage.setItem(AUTH_TOKEN_KEY, token)
+  window.sessionStorage.setItem(AUTH_USER_KEY, JSON.stringify(user))
+}
+
+async function clearPersistedAuthSession() {
+  if (supportsSecureDesktopSession()) {
+    await window.electronAPI.clearAuthSession()
+    return
+  }
+
+  window.sessionStorage.removeItem(AUTH_TOKEN_KEY)
+  window.sessionStorage.removeItem(AUTH_USER_KEY)
 }
 
 function classifyStatusTone(status) {
@@ -562,15 +600,14 @@ function App() {
     shownAt: 0
   })
 
-  const [authToken, setAuthToken] = useState(() => {
-    return window.localStorage.getItem(AUTH_TOKEN_KEY) || ''
-  })
-  const [authUser, setAuthUser] = useState(loadStoredAuthUser)
+  const [authToken, setAuthToken] = useState('')
+  const [authUser, setAuthUser] = useState(null)
   const [authEmail, setAuthEmail] = useState('')
   const [authPassword, setAuthPassword] = useState('')
   const [authMode, setAuthMode] = useState('login')
   const [isAuthenticating, setIsAuthenticating] = useState(false)
-  const [isCheckingAuth, setIsCheckingAuth] = useState(Boolean(authToken))
+  const [isCheckingAuth, setIsCheckingAuth] = useState(true)
+  const [hasLoadedPersistedSession, setHasLoadedPersistedSession] = useState(false)
 
   const [status, setStatus] = useState('Ready')
   const [errorPopup, setErrorPopup] = useState(null)
@@ -593,7 +630,7 @@ function App() {
   const [activeTab, setActiveTab] = useState(TAB_KEYS.CAPTURES)
   const [displayTab, setDisplayTab] = useState(TAB_KEYS.CAPTURES)
   const [tabStage, setTabStage] = useState('idle')
-  const [displayScreen, setDisplayScreen] = useState(() => resolveScreen(authUser, Boolean(authToken)))
+  const [displayScreen, setDisplayScreen] = useState(() => resolveScreen(null, true))
   const [screenStage, setScreenStage] = useState('idle')
 
   const [recentCaptures, setRecentCaptures] = useState([])
@@ -895,6 +932,36 @@ function App() {
     },
     [showErrorPopup]
   )
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function restorePersistedSession() {
+      try {
+        const session = await loadPersistedAuthSession()
+        if (!cancelled && session?.token && session?.user) {
+          setAuthToken(session.token)
+          setAuthUser(session.user)
+        }
+      } catch (err) {
+        if (!cancelled) {
+          appLogger.warn('auth_session_load_failed', {
+            error: summarizeError(err)
+          })
+        }
+      } finally {
+        if (!cancelled) {
+          setHasLoadedPersistedSession(true)
+        }
+      }
+    }
+
+    restorePersistedSession()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const loadRecentCaptures = useCallback(async () => {
     if (!authUser) {
@@ -1236,6 +1303,10 @@ function App() {
   }, [isRegionSelectorOpen, onCancelRegionCapture])
 
   useEffect(() => {
+    if (!hasLoadedPersistedSession) {
+      return
+    }
+
     if (!authToken) {
       setAuthUser(null)
       setIsCheckingAuth(false)
@@ -1262,7 +1333,11 @@ function App() {
           if (!cancelled) {
             if (res.status === 401 || res.status === 403) {
               appLogger.warn('auth_session_invalidated')
-              clearAuthSession()
+              void clearPersistedAuthSession().catch((clearErr) => {
+                appLogger.warn('auth_session_clear_failed', {
+                  error: summarizeError(clearErr)
+                })
+              })
               setAuthToken('')
               setAuthUser(null)
               setStatus('Session expired. Please sign in again.')
@@ -1286,7 +1361,11 @@ function App() {
             email: maskEmail(data.user.email)
           })
           setAuthUser(data.user)
-          saveAuthSession(authToken, data.user)
+          void persistAuthSession(authToken, data.user).catch((persistErr) => {
+            appLogger.warn('auth_session_persist_failed', {
+              error: summarizeError(persistErr)
+            })
+          })
         }
       } catch (err) {
         if (!cancelled) {
@@ -1307,7 +1386,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [authHeaders, authToken, backendURL, reportError])
+  }, [authHeaders, authToken, backendURL, hasLoadedPersistedSession, reportError])
 
   useEffect(() => {
     let unsubscribe = () => {}
@@ -1602,7 +1681,11 @@ function App() {
       setAuthPassword('')
       setTelegramEventID('')
       setTelegramLinkStatus('checking')
-      saveAuthSession(data.token, data.user)
+      void persistAuthSession(data.token, data.user).catch((persistErr) => {
+        appLogger.warn('auth_session_persist_failed', {
+          error: summarizeError(persistErr)
+        })
+      })
       setStatus(authMode === 'register' ? 'Account created and logged in.' : 'Logged in.')
     } catch (err) {
       appLogger.error('auth_submit_failed', {
@@ -1621,7 +1704,11 @@ function App() {
       user_id: authUser?.user_id || '',
       email: maskEmail(authUser?.email || '')
     })
-    clearAuthSession()
+    void clearPersistedAuthSession().catch((clearErr) => {
+      appLogger.warn('auth_session_clear_failed', {
+        error: summarizeError(clearErr)
+      })
+    })
     setAuthToken('')
     setAuthUser(null)
     setAuthPassword('')

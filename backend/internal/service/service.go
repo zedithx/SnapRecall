@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/base32"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -17,7 +18,10 @@ import (
 	"importanttracker/backend/internal/model"
 )
 
-var telegramEventPattern = regexp.MustCompile(`EVT-[A-Z0-9]{6}`)
+var telegramEventPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`EVT-[A-Z2-7]{26}`),
+	regexp.MustCompile(`EVT-[A-Z0-9]{6}`),
+}
 
 const telegramLinkEventTTL = 10 * time.Minute
 
@@ -494,12 +498,13 @@ func extractTelegramEventID(text string) string {
 		return ""
 	}
 
-	match := telegramEventPattern.FindString(upper)
-	if match == "" {
-		return ""
+	for _, pattern := range telegramEventPatterns {
+		match := pattern.FindString(upper)
+		if match != "" {
+			return match
+		}
 	}
-
-	return match
+	return ""
 }
 
 func normalizeTelegramEventID(raw string) string {
@@ -525,11 +530,15 @@ func generateCaptureID() string {
 }
 
 func generateTelegramEventID() string {
-	buf := make([]byte, 3)
+	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
-		return fmt.Sprintf("EVT-%06d", time.Now().UnixNano()%1000000)
+		fallback := make([]byte, 16)
+		copy(fallback, []byte(fmt.Sprintf("%016x", time.Now().UTC().UnixNano())))
+		code := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(fallback)
+		return "EVT-" + strings.ToUpper(code)
 	}
-	return "EVT-" + strings.ToUpper(hex.EncodeToString(buf))
+	code := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(buf)
+	return "EVT-" + strings.ToUpper(code)
 }
 
 func generateUserID() string {

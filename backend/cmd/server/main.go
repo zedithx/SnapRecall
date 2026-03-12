@@ -49,6 +49,7 @@ func main() {
 	if err != nil {
 		fatalLog("failed_to_initialize_auth_manager", slog.String("error", err.Error()))
 	}
+	rateLimiter := newFixedWindowRateLimiter()
 
 	var botUsername atomic.Value
 	botUsername.Store("")
@@ -81,8 +82,11 @@ func main() {
 		}
 
 		var in model.AuthRegisterInput
-		if err := decodeJSON(r, &in); err != nil {
+		if err := decodeJSONBody(w, r, &in, maxAuthBodyBytes); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if !enforceRegisterRateLimits(w, r, rateLimiter, in.Email) {
 			return
 		}
 
@@ -118,8 +122,11 @@ func main() {
 		}
 
 		var in model.AuthLoginInput
-		if err := decodeJSON(r, &in); err != nil {
+		if err := decodeJSONBody(w, r, &in, maxAuthBodyBytes); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if !enforceLoginRateLimits(w, r, rateLimiter, in.Email) {
 			return
 		}
 
@@ -181,11 +188,18 @@ func main() {
 		}
 
 		var in model.CaptureInput
-		if err := decodeJSON(r, &in); err != nil {
+		if err := decodeJSONBody(w, r, &in, maxCaptureBodyBytes); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := validateCaptureInput(in); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
 		in.UserID = claims.UserID
+		if !enforceCaptureRateLimits(w, r, rateLimiter, claims.UserID) {
+			return
+		}
 
 		ctx, cancel := context.WithTimeout(r.Context(), cfg.AIRequestTimeout)
 		defer cancel()
@@ -294,11 +308,18 @@ func main() {
 		}
 
 		var in model.QueryInput
-		if err := decodeJSON(r, &in); err != nil {
+		if err := decodeJSONBody(w, r, &in, maxQueryBodyBytes); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := validateQueryInput(in); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
 		in.UserID = claims.UserID
+		if !enforceQueryRateLimits(w, r, rateLimiter, claims.UserID) {
+			return
+		}
 
 		ctx, cancel := context.WithTimeout(r.Context(), cfg.AIRequestTimeout)
 		defer cancel()
@@ -328,14 +349,7 @@ func main() {
 			return
 		}
 
-		var in model.TelegramLinkStartInput
-		if err := decodeJSON(r, &in); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		in.UserID = claims.UserID
-
-		link, err := svc.StartTelegramLink(in.UserID)
+		link, err := svc.StartTelegramLink(claims.UserID)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
@@ -422,10 +436,12 @@ func main() {
 	writeTimeout := maxDuration(cfg.RequestTimeout, cfg.AIRequestTimeout) + 10*time.Second
 	server := &http.Server{
 		Addr:         addr,
-		Handler:      withRequestLogging(withRecovery(withCORS(mux)), authManager),
+		Handler:      withRequestLogging(withRecovery(withCORS(mux, cfg.AllowedOrigins)), authManager),
+		ReadHeaderTimeout: serverReadHeaderTimeout * time.Second,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: writeTimeout,
 		IdleTimeout:  60 * time.Second,
+		MaxHeaderBytes: serverMaxHeaderBytes,
 	}
 
 	slog.Info("backend_listening", slog.String("addr", addr))
@@ -524,32 +540,10 @@ func startTelegramLinkWatcher(tgClient *telegram.Client, svc *service.Service) {
 	}()
 }
 
-func decodeJSON(r *http.Request, out any) error {
-	defer r.Body.Close()
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	return dec.Decode(out)
-}
-
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
-}
-
-func withCORS(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
-
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
 }
 
 func optionalAuthClaims(r *http.Request, authManager *auth.Manager) (*auth.Claims, error) {

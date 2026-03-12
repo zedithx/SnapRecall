@@ -2,7 +2,7 @@
 
 ## What this app does
 - Uses backend from `VITE_API_BASE_URL` (defaults to `http://localhost:8080`).
-- Supports account register/login with persisted session token.
+- Supports account register/login with persisted session restored through the Electron main process.
 - Requires login for capture, ask, and Telegram integration.
 - Supports two layouts: `Command Workspace` and `Bubble Mode`.
 - In Bubble Mode, the app can collapse to a small floating bubble and expand on click.

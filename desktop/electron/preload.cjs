@@ -4,6 +4,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   captureScreen: () => ipcRenderer.invoke('capture-screen'),
   captureScreenForSelection: () => ipcRenderer.invoke('capture-screen-selection'),
   getAppInfo: () => ipcRenderer.invoke('app:get-info'),
+  getAuthSession: () => ipcRenderer.invoke('auth-session:get'),
+  setAuthSession: (session) => ipcRenderer.invoke('auth-session:set', session),
+  clearAuthSession: () => ipcRenderer.invoke('auth-session:clear'),
   logEvent: (entry) => ipcRenderer.send('log:event', entry),
   updateCaptureShortcut: (shortcut) =>
     ipcRenderer.invoke('shortcut:update', shortcut),

@@ -14,6 +14,7 @@ type Config struct {
 	LogLevel              string
 	LogFormat             string
 	Port                  string
+	AllowedOrigins        []string
 	RequestTimeout        time.Duration
 	AIRequestTimeout      time.Duration
 	DataDir               string
@@ -40,6 +41,7 @@ func Load() (*Config, error) {
 		LogLevel:              getOrDefault("LOG_LEVEL", "info"),
 		LogFormat:             getOrDefault("LOG_FORMAT", "auto"),
 		Port:                  getOrDefault("APP_PORT", "8080"),
+		AllowedOrigins:        getCSVOrDefault("ALLOWED_ORIGINS", []string{"http://localhost:5173", "http://127.0.0.1:5173", "null"}),
 		RequestTimeout:        time.Duration(getIntOrDefault("REQUEST_TIMEOUT_SECONDS", 20)) * time.Second,
 		AIRequestTimeout:      time.Duration(getIntOrDefault("AI_REQUEST_TIMEOUT_SECONDS", 60)) * time.Second,
 		DataDir:               getOrDefault("DATA_DIR", "./data"),
@@ -101,6 +103,38 @@ func getIntOrDefault(key string, fallback int) int {
 		return fallback
 	}
 	return i
+}
+
+func getCSVOrDefault(key string, fallback []string) []string {
+	parsed := parseCSV(os.Getenv(key))
+	if len(parsed) == 0 {
+		out := make([]string, len(fallback))
+		copy(out, fallback)
+		return out
+	}
+	return parsed
+}
+
+func parseCSV(raw string) []string {
+	parts := strings.Split(raw, ",")
+	if len(parts) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(parts))
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		value := strings.TrimSpace(part)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		values = append(values, value)
+	}
+	return values
 }
 
 func loadDotEnvIfPresent(paths ...string) {

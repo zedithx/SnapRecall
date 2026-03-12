@@ -134,6 +134,7 @@ func logStartupConfig(cfg *config.Config) {
 		"backend_config_loaded",
 		slog.String("app_env", cfg.AppEnv),
 		slog.String("port", cfg.Port),
+		slog.Int("allowed_origin_count", len(cfg.AllowedOrigins)),
 		slog.String("request_timeout", cfg.RequestTimeout.String()),
 		slog.String("ai_request_timeout", cfg.AIRequestTimeout.String()),
 		slog.String("openai_model", cfg.OpenAIModel),
